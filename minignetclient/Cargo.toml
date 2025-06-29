@@ -1,0 +1,11 @@
+[package]
+name = "minignetclient"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.45", features = ["full"] }
+bincode = "2.0.1"
+pretty_env_logger = "0.5.0"
+log = "0.4"
+minignetcommon = { path = "../minignetcommon" }

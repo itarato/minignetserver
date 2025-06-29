@@ -1,0 +1,42 @@
+use bincode::{Decode, Encode};
+
+use log::{error, info};
+use tokio::{io::AsyncReadExt, net::tcp::ReadHalf};
+
+pub type Error = Box<dyn std::error::Error + Send + Sync>;
+
+pub type SequenceIDType = String;
+
+pub async fn read_socket_till_end(reader: &mut ReadHalf<'_>) -> Result<Vec<u8>, Error> {
+    let mut buf: [u8; 1024] = [0; 1024];
+    let mut bytes = vec![];
+
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(size) => {
+                if size == 0 {
+                    info!("Connection closed");
+                    return Ok(bytes);
+                }
+
+                bytes.extend_from_slice(&buf[0..size]);
+                info!("Received {} bytes", size);
+            }
+            Err(err) => {
+                error!("Error while reading: {:?}", err);
+                return Err(err.into());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Decode, Encode)]
+pub enum Operation {
+    JoinSession(SequenceIDType),
+}
+
+#[derive(Debug, Decode, Encode)]
+pub enum Response {
+    Ok,
+    Error,
+}
