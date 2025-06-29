@@ -1,1 +1,0 @@
-/home/itarato/CHECKOUT/minignet/target/debug/example: /home/itarato/CHECKOUT/minignet/example/src/main.rs /home/itarato/CHECKOUT/minignet/minignetclient/src/lib.rs /home/itarato/CHECKOUT/minignet/minignetcommon/src/lib.rs
