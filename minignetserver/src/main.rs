@@ -4,7 +4,7 @@ extern crate pretty_env_logger;
 use std::{collections::HashMap, sync::Arc};
 
 use log::{error, info};
-use minignetcommon::{Operation, Response, SequenceIDType};
+use minignetcommon::{GamerIdType, Operation, Response, SessionIdType};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -16,17 +16,40 @@ pub(crate) struct UserUpdate {
     update: Vec<u8>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct UserState {
+    gamer_id: GamerIdType,
     updates: Vec<UserUpdate>,
 }
 
-impl UserState {}
+impl UserState {
+    pub(crate) fn new(gamer_id: GamerIdType) -> Self {
+        Self {
+            gamer_id,
+            updates: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct GameSession {
+    session_id: SessionIdType,
+    user_states: HashMap<GamerIdType, UserState>,
+}
+
+impl GameSession {
+    pub(crate) fn new(session_id: SessionIdType) -> Self {
+        Self {
+            session_id,
+            user_states: HashMap::new(),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct WorldState {
-    user_states: HashMap<SequenceIDType, UserState>,
-    sequence: Vec<SequenceIDType>,
+    sessions: HashMap<SessionIdType, GameSession>,
+    sequence: Vec<GamerIdType>,
     current: usize,
 }
 
@@ -77,14 +100,20 @@ impl MGNServer {
             bincode::decode_from_slice(&bytes[..], bincode::config::standard());
 
         match op {
-            Ok((Operation::JoinSession(id), _len)) => {
-                info!("Received JOIN-SESSION message for id: {:?}", id);
+            Ok((Operation::JoinSession(session_id, gamer_id), _len)) => {
+                info!(
+                    "Received JOIN-SESSION message for session id: {:?} and gamer id: {:?}",
+                    session_id, gamer_id
+                );
 
                 world_state
                     .lock()
                     .await
+                    .sessions
+                    .entry(session_id.clone())
+                    .or_insert(GameSession::new(session_id))
                     .user_states
-                    .insert(id, UserState::default());
+                    .insert(gamer_id.clone(), UserState::new(gamer_id));
 
                 let ok_encoded = bincode::encode_to_vec(Response::Ok, bincode::config::standard())
                     .expect("Failed encoding ok message");

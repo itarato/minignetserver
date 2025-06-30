@@ -3,7 +3,9 @@ extern crate log;
 use std::net::{SocketAddr, ToSocketAddrs};
 
 use log::error;
-use minignetcommon::{Error, Operation, Response, SequenceIDType, read_socket_till_end};
+use minignetcommon::{
+    Error, GamerIdType, Operation, Response, SessionIdType, read_socket_till_end,
+};
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 pub struct MGNClient {
@@ -28,8 +30,12 @@ impl MGNClient {
         })
     }
 
-    pub async fn join_session(&self, id: SequenceIDType) -> Result<Response, Error> {
-        let op = Operation::JoinSession(id);
+    pub async fn join_session(
+        &self,
+        session_id: SessionIdType,
+        gamer_id: GamerIdType,
+    ) -> Result<Response, Error> {
+        let op = Operation::JoinSession(session_id, gamer_id);
         let op_encoded = bincode::encode_to_vec(op, self.serialization_config)?;
 
         match TcpStream::connect(self.addr).await {

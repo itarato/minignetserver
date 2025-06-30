@@ -5,7 +5,8 @@ use tokio::{io::AsyncReadExt, net::tcp::ReadHalf};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
-pub type SequenceIDType = String;
+pub type GamerIdType = String;
+pub type SessionIdType = String;
 
 pub async fn read_socket_till_end(reader: &mut ReadHalf<'_>) -> Result<Vec<u8>, Error> {
     let mut buf: [u8; 1024] = [0; 1024];
@@ -32,7 +33,7 @@ pub async fn read_socket_till_end(reader: &mut ReadHalf<'_>) -> Result<Vec<u8>, 
 
 #[derive(Debug, Decode, Encode)]
 pub enum Operation {
-    JoinSession(SequenceIDType),
+    JoinSession(SessionIdType, GamerIdType),
 }
 
 #[derive(Debug, Decode, Encode)]
