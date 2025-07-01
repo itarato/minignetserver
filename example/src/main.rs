@@ -1,6 +1,8 @@
 extern crate log;
 extern crate pretty_env_logger;
 
+use std::result;
+
 use log::info;
 use minignetclient::MGNClient;
 
@@ -21,5 +23,11 @@ async fn main() {
         .start_session("session_01".into())
         .await
         .expect("Failed starting session");
+    dbg!(result);
+
+    let result = client
+        .is_gamer_turn("session_01".into(), "lennox".into())
+        .await
+        .expect("Failed is gamer turn");
     dbg!(result);
 }

@@ -71,4 +71,13 @@ impl MGNClient {
         self.send_message_to_server(Operation::StartSession(session_id))
             .await
     }
+
+    pub async fn is_gamer_turn(
+        &self,
+        session_id: SessionIdType,
+        gamer_id: GamerIdType,
+    ) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::IsGamerTurn(session_id, gamer_id))
+            .await
+    }
 }

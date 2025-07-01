@@ -68,13 +68,15 @@ impl GameSession {
         self.user_states.insert(
             gamer_id.clone(),
             UserState {
-                gamer_id,
+                gamer_id: gamer_id.clone(),
                 updates: Default::default(),
             },
         );
+
+        self.sequence.push(gamer_id);
     }
 
-    pub(crate) fn is_current(&self, gamer_id: GamerIdType) -> bool {
+    pub(crate) fn is_gamer_turn(&self, gamer_id: GamerIdType) -> bool {
         if self.state != GameState::Game {
             return false;
         }
@@ -154,6 +156,10 @@ impl MGNServer {
             Ok((Operation::StartSession(session_id), ..)) => {
                 MGNServer::process_start_session(&mut writer, session_id, world_state).await;
             }
+            Ok((Operation::IsGamerTurn(session_id, gamer_id), ..)) => {
+                MGNServer::process_is_gamer_turn(&mut writer, session_id, gamer_id, world_state)
+                    .await;
+            }
             Err(err) => {
                 error!("Failed decoding input: {:?}", err);
 
@@ -223,6 +229,37 @@ impl MGNServer {
 
         let ok_encoded = bincode::encode_to_vec(Response::Ok, bincode::config::standard())
             .expect("Failed encoding ok message");
+        if let Err(err) = writer.write(&ok_encoded[..]).await {
+            error!("Failed responsing ok: {:?}", err);
+        }
+    }
+
+    async fn process_is_gamer_turn(
+        writer: &mut WriteHalf<'_>,
+        session_id: SessionIdType,
+        gamer_id: GamerIdType,
+        world_state: Arc<Mutex<WorldState>>,
+    ) {
+        info!(
+            "Received IS-GAMER-TURN message for session id: {:?} and gamer id: {:?}",
+            session_id, gamer_id,
+        );
+
+        let is_gamer_turn;
+        {
+            let mut state = world_state.lock().await;
+            is_gamer_turn = state
+                .sessions
+                .get_mut(&session_id)
+                .map(|session| session.is_gamer_turn(gamer_id))
+                .unwrap_or(false);
+        }
+
+        let ok_encoded = bincode::encode_to_vec(
+            Response::OkWithBool(is_gamer_turn),
+            bincode::config::standard(),
+        )
+        .expect("Failed encoding ok message");
         if let Err(err) = writer.write(&ok_encoded[..]).await {
             error!("Failed responsing ok: {:?}", err);
         }
