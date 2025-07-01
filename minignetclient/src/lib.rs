@@ -100,4 +100,12 @@ impl MGNClient {
         self.send_message_to_server(Operation::SendUpdate(session_id, gamer_id, update))
             .await
     }
+
+    pub async fn get_previous_round_updates(
+        &self,
+        session_id: SessionIdType,
+    ) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::GetPreviousRoundUpdates(session_id))
+            .await
+    }
 }

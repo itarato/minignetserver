@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bincode::{Decode, Encode};
 
 use log::{error, info};
@@ -39,6 +41,7 @@ pub enum Operation {
     EndSession(SessionIdType),
     IsGamerTurn(SessionIdType, GamerIdType),
     SendUpdate(SessionIdType, GamerIdType, Vec<u8>),
+    GetPreviousRoundUpdates(SessionIdType),
 }
 
 #[derive(Debug, Decode, Encode, Clone)]
@@ -46,4 +49,5 @@ pub enum Response {
     Ok,
     Error,
     OkWithBool(bool),
+    OkWithPreviousRoundUpdates(HashMap<GamerIdType, Option<Vec<u8>>>),
 }

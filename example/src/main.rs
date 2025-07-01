@@ -36,6 +36,18 @@ async fn main() {
     dbg!(result);
 
     let result = client
+        .send_update("session_01".into(), "lennox".into(), b"kukulala".to_vec())
+        .await
+        .expect("Failed sending update");
+    dbg!(result);
+
+    let result = client
+        .get_previous_round_updates("session_01".into())
+        .await
+        .expect("Failed getting previous round updates");
+    dbg!(result);
+
+    let result = client
         .end_session("session_01".into())
         .await
         .expect("Failed ending session");

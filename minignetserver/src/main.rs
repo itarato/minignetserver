@@ -11,9 +11,9 @@ use tokio::{
     sync::Mutex,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct UserUpdate {
-    update: Vec<u8>,
+    pub update: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -217,6 +217,14 @@ impl MGNServer {
                         )
                         .await;
                     }
+                    Operation::GetPreviousRoundUpdates(session_id) => {
+                        MGNServer::process_get_previous_round_updates(
+                            &mut writer,
+                            session_id,
+                            world_state,
+                        )
+                        .await;
+                    }
                 };
             }
             Err(err) => {
@@ -374,6 +382,42 @@ impl MGNServer {
         }
 
         MGNServer::reply_client(writer, Response::Ok).await
+    }
+
+    async fn process_get_previous_round_updates(
+        writer: &mut WriteHalf<'_>,
+        session_id: SessionIdType,
+        world_state: Arc<Mutex<WorldState>>,
+    ) {
+        let mut previous_round_updates = HashMap::new();
+
+        {
+            let mut state = world_state.lock().await;
+            let session = match state.sessions.get_mut(&session_id) {
+                Some(session) => session,
+                None => {
+                    error!("Session is missing");
+                    MGNServer::reply_client(writer, Response::Error).await;
+                    return;
+                }
+            };
+
+            for (gamer_id, user_state) in session.user_states.iter() {
+                previous_round_updates.insert(
+                    gamer_id.clone(),
+                    user_state
+                        .updates
+                        .last()
+                        .map(|user_update| user_update.update.clone()),
+                );
+            }
+        }
+
+        MGNServer::reply_client(
+            writer,
+            Response::OkWithPreviousRoundUpdates(previous_round_updates),
+        )
+        .await
     }
 }
 
