@@ -33,6 +33,10 @@ impl UserState {
     pub(crate) fn add_update(&mut self, update: Vec<u8>) {
         self.updates.push(UserUpdate { update });
     }
+
+    pub(crate) fn reset(&mut self) {
+        self.updates.clear();
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -90,6 +94,15 @@ impl GameSession {
             .position(|id| id == &gamer_id)
             .map(|pos| pos == self.current_gamer_index)
             .unwrap_or(false)
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.state = GameState::Join;
+        self.current_gamer_index = 0;
+
+        for (_, user_state) in self.user_states.iter_mut() {
+            user_state.reset();
+        }
     }
 
     pub(crate) fn start(&mut self) {
@@ -174,6 +187,10 @@ impl MGNServer {
                         )
                         .await;
                     }
+                    Operation::ResetSession(session_id) => {
+                        MGNServer::process_reset_session(&mut writer, session_id, world_state)
+                            .await;
+                    }
                     Operation::StartSession(session_id) => {
                         MGNServer::process_start_session(&mut writer, session_id, world_state)
                             .await;
@@ -247,6 +264,26 @@ impl MGNServer {
         MGNServer::reply_client(writer, Response::Ok).await
     }
 
+    async fn process_reset_session(
+        writer: &mut WriteHalf<'_>,
+        session_id: SessionIdType,
+        world_state: Arc<Mutex<WorldState>>,
+    ) {
+        {
+            let mut state = world_state.lock().await;
+            match state.sessions.get_mut(&session_id) {
+                Some(session) => session.reset(),
+                None => {
+                    error!("Session {:?}, it does not exist", session_id);
+                    MGNServer::reply_client(writer, Response::Error).await;
+                    return;
+                }
+            };
+        }
+
+        MGNServer::reply_client(writer, Response::Ok).await
+    }
+
     async fn process_start_session(
         writer: &mut WriteHalf<'_>,
         session_id: SessionIdType,
@@ -254,13 +291,14 @@ impl MGNServer {
     ) {
         {
             let mut state = world_state.lock().await;
-            state
-                .sessions
-                .get_mut(&session_id)
-                .map(|session| session.start())
-                .unwrap_or_else(|| {
+            match state.sessions.get_mut(&session_id) {
+                Some(session) => session.start(),
+                None => {
                     error!("Cannot start session {:?}, it does not exist", session_id);
-                });
+                    MGNServer::reply_client(writer, Response::Error).await;
+                    return;
+                }
+            };
         }
 
         MGNServer::reply_client(writer, Response::Ok).await
@@ -273,13 +311,14 @@ impl MGNServer {
     ) {
         {
             let mut state = world_state.lock().await;
-            state
-                .sessions
-                .get_mut(&session_id)
-                .map(|session| session.end())
-                .unwrap_or_else(|| {
+            match state.sessions.get_mut(&session_id) {
+                Some(session) => session.end(),
+                None => {
                     error!("Cannot start session {:?}, it does not exist", session_id);
-                });
+                    MGNServer::reply_client(writer, Response::Error).await;
+                    return;
+                }
+            };
         }
 
         MGNServer::reply_client(writer, Response::Ok).await

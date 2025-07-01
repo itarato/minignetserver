@@ -18,6 +18,12 @@ async fn main() {
     dbg!(result);
 
     let result = client
+        .reset_session("session_01".into())
+        .await
+        .expect("Failed to reset session");
+    dbg!(result);
+
+    let result = client
         .start_session("session_01".into())
         .await
         .expect("Failed starting session");

@@ -67,6 +67,11 @@ impl MGNClient {
             .await
     }
 
+    pub async fn reset_session(&self, session_id: SessionIdType) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::ResetSession(session_id))
+            .await
+    }
+
     pub async fn start_session(&self, session_id: SessionIdType) -> Result<Response, Error> {
         self.send_message_to_server(Operation::StartSession(session_id))
             .await
