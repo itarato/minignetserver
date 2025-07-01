@@ -72,12 +72,27 @@ impl MGNClient {
             .await
     }
 
+    pub async fn end_session(&self, session_id: SessionIdType) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::EndSession(session_id))
+            .await
+    }
+
     pub async fn is_gamer_turn(
         &self,
         session_id: SessionIdType,
         gamer_id: GamerIdType,
     ) -> Result<Response, Error> {
         self.send_message_to_server(Operation::IsGamerTurn(session_id, gamer_id))
+            .await
+    }
+
+    pub async fn send_update(
+        &self,
+        session_id: SessionIdType,
+        gamer_id: GamerIdType,
+        update: Vec<u8>,
+    ) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::SendUpdate(session_id, gamer_id, update))
             .await
     }
 }

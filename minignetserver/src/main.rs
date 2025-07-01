@@ -29,6 +29,10 @@ impl UserState {
             updates: Default::default(),
         }
     }
+
+    pub(crate) fn add_update(&mut self, update: Vec<u8>) {
+        self.updates.push(UserUpdate { update });
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -95,6 +99,14 @@ impl GameSession {
             error!("Starting a session that is not in JOIN state");
         }
     }
+
+    pub(crate) fn end(&mut self) {
+        if self.state == GameState::Game {
+            self.state = GameState::Over;
+        } else {
+            error!("Ending a session that is not in GAME state");
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -149,16 +161,46 @@ impl MGNServer {
             bincode::decode_from_slice(&bytes[..], bincode::config::standard());
 
         match op {
-            Ok((Operation::JoinSession(session_id, gamer_id), ..)) => {
-                MGNServer::process_join_session(&mut writer, session_id, gamer_id, world_state)
-                    .await;
-            }
-            Ok((Operation::StartSession(session_id), ..)) => {
-                MGNServer::process_start_session(&mut writer, session_id, world_state).await;
-            }
-            Ok((Operation::IsGamerTurn(session_id, gamer_id), ..)) => {
-                MGNServer::process_is_gamer_turn(&mut writer, session_id, gamer_id, world_state)
-                    .await;
+            Ok((operation, ..)) => {
+                info!("Received operation: {:?}", &operation);
+
+                match operation {
+                    Operation::JoinSession(session_id, gamer_id) => {
+                        MGNServer::process_join_session(
+                            &mut writer,
+                            session_id,
+                            gamer_id,
+                            world_state,
+                        )
+                        .await;
+                    }
+                    Operation::StartSession(session_id) => {
+                        MGNServer::process_start_session(&mut writer, session_id, world_state)
+                            .await;
+                    }
+                    Operation::EndSession(session_id) => {
+                        MGNServer::process_end_session(&mut writer, session_id, world_state).await;
+                    }
+                    Operation::IsGamerTurn(session_id, gamer_id) => {
+                        MGNServer::process_is_gamer_turn(
+                            &mut writer,
+                            session_id,
+                            gamer_id,
+                            world_state,
+                        )
+                        .await;
+                    }
+                    Operation::SendUpdate(session_id, gamer_id, update) => {
+                        MGNServer::process_send_update(
+                            &mut writer,
+                            session_id,
+                            gamer_id,
+                            update,
+                            world_state,
+                        )
+                        .await;
+                    }
+                };
             }
             Err(err) => {
                 error!("Failed decoding input: {:?}", err);
@@ -178,17 +220,20 @@ impl MGNServer {
         }
     }
 
+    async fn reply_client(writer: &mut WriteHalf<'_>, response: Response) {
+        let encoded = bincode::encode_to_vec(response.clone(), bincode::config::standard())
+            .expect(&format!("Failed encoding response message: {:?}", response));
+        if let Err(err) = writer.write(&encoded[..]).await {
+            error!("Failed responding to client: {:?}", err);
+        }
+    }
+
     async fn process_join_session(
         writer: &mut WriteHalf<'_>,
         session_id: SessionIdType,
         gamer_id: GamerIdType,
         world_state: Arc<Mutex<WorldState>>,
     ) {
-        info!(
-            "Received JOIN-SESSION message for session id: {:?} and gamer id: {:?}",
-            session_id, gamer_id
-        );
-
         {
             let mut state = world_state.lock().await;
             let session = state
@@ -199,11 +244,7 @@ impl MGNServer {
             session.join(gamer_id);
         }
 
-        let ok_encoded = bincode::encode_to_vec(Response::Ok, bincode::config::standard())
-            .expect("Failed encoding ok message");
-        if let Err(err) = writer.write(&ok_encoded[..]).await {
-            error!("Failed responsing ok: {:?}", err);
-        }
+        MGNServer::reply_client(writer, Response::Ok).await
     }
 
     async fn process_start_session(
@@ -211,11 +252,6 @@ impl MGNServer {
         session_id: SessionIdType,
         world_state: Arc<Mutex<WorldState>>,
     ) {
-        info!(
-            "Received START-SESSION message for session id: {:?}",
-            session_id
-        );
-
         {
             let mut state = world_state.lock().await;
             state
@@ -227,11 +263,26 @@ impl MGNServer {
                 });
         }
 
-        let ok_encoded = bincode::encode_to_vec(Response::Ok, bincode::config::standard())
-            .expect("Failed encoding ok message");
-        if let Err(err) = writer.write(&ok_encoded[..]).await {
-            error!("Failed responsing ok: {:?}", err);
+        MGNServer::reply_client(writer, Response::Ok).await
+    }
+
+    async fn process_end_session(
+        writer: &mut WriteHalf<'_>,
+        session_id: SessionIdType,
+        world_state: Arc<Mutex<WorldState>>,
+    ) {
+        {
+            let mut state = world_state.lock().await;
+            state
+                .sessions
+                .get_mut(&session_id)
+                .map(|session| session.end())
+                .unwrap_or_else(|| {
+                    error!("Cannot start session {:?}, it does not exist", session_id);
+                });
         }
+
+        MGNServer::reply_client(writer, Response::Ok).await
     }
 
     async fn process_is_gamer_turn(
@@ -240,29 +291,50 @@ impl MGNServer {
         gamer_id: GamerIdType,
         world_state: Arc<Mutex<WorldState>>,
     ) {
-        info!(
-            "Received IS-GAMER-TURN message for session id: {:?} and gamer id: {:?}",
-            session_id, gamer_id,
-        );
-
         let is_gamer_turn;
         {
             let mut state = world_state.lock().await;
-            is_gamer_turn = state
-                .sessions
-                .get_mut(&session_id)
-                .map(|session| session.is_gamer_turn(gamer_id))
-                .unwrap_or(false);
+            is_gamer_turn = match state.sessions.get_mut(&session_id) {
+                Some(session) => session.is_gamer_turn(gamer_id),
+                None => {
+                    error!("Missing session");
+                    MGNServer::reply_client(writer, Response::Error).await;
+                    return;
+                }
+            };
         }
 
-        let ok_encoded = bincode::encode_to_vec(
-            Response::OkWithBool(is_gamer_turn),
-            bincode::config::standard(),
-        )
-        .expect("Failed encoding ok message");
-        if let Err(err) = writer.write(&ok_encoded[..]).await {
-            error!("Failed responsing ok: {:?}", err);
+        MGNServer::reply_client(writer, Response::OkWithBool(is_gamer_turn)).await
+    }
+
+    async fn process_send_update(
+        writer: &mut WriteHalf<'_>,
+        session_id: SessionIdType,
+        gamer_id: GamerIdType,
+        update: Vec<u8>,
+        world_state: Arc<Mutex<WorldState>>,
+    ) {
+        {
+            let mut state = world_state.lock().await;
+            let session = match state.sessions.get_mut(&session_id) {
+                Some(session) => session,
+                None => {
+                    error!("Session is missing");
+                    MGNServer::reply_client(writer, Response::Error).await;
+                    return;
+                }
+            };
+            match session.user_states.get_mut(&gamer_id) {
+                Some(user_state) => user_state.add_update(update),
+                None => {
+                    error!("Gamer is missing missing");
+                    MGNServer::reply_client(writer, Response::Error).await;
+                    return;
+                }
+            }
         }
+
+        MGNServer::reply_client(writer, Response::Ok).await
     }
 }
 

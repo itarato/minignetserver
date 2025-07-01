@@ -35,10 +35,12 @@ pub async fn read_socket_till_end(reader: &mut ReadHalf<'_>) -> Result<Vec<u8>, 
 pub enum Operation {
     JoinSession(SessionIdType, GamerIdType),
     StartSession(SessionIdType),
+    EndSession(SessionIdType),
     IsGamerTurn(SessionIdType, GamerIdType),
+    SendUpdate(SessionIdType, GamerIdType, Vec<u8>),
 }
 
-#[derive(Debug, Decode, Encode)]
+#[derive(Debug, Decode, Encode, Clone)]
 pub enum Response {
     Ok,
     Error,
