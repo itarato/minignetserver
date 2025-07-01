@@ -30,12 +30,7 @@ impl MGNClient {
         })
     }
 
-    pub async fn join_session(
-        &self,
-        session_id: SessionIdType,
-        gamer_id: GamerIdType,
-    ) -> Result<Response, Error> {
-        let op = Operation::JoinSession(session_id, gamer_id);
+    async fn send_message_to_server(&self, op: Operation) -> Result<Response, Error> {
         let op_encoded = bincode::encode_to_vec(op, self.serialization_config)?;
 
         match TcpStream::connect(self.addr).await {
@@ -61,5 +56,19 @@ impl MGNClient {
                 return Err(e.into());
             }
         }
+    }
+
+    pub async fn join_session(
+        &self,
+        session_id: SessionIdType,
+        gamer_id: GamerIdType,
+    ) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::JoinSession(session_id, gamer_id))
+            .await
+    }
+
+    pub async fn start_session(&self, session_id: SessionIdType) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::StartSession(session_id))
+            .await
     }
 }

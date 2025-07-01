@@ -90,6 +90,7 @@ impl GameSession {
         if self.state == GameState::Join {
             self.state = GameState::Game;
         } else {
+            error!("Starting a session that is not in JOIN state");
         }
     }
 }
@@ -146,9 +147,12 @@ impl MGNServer {
             bincode::decode_from_slice(&bytes[..], bincode::config::standard());
 
         match op {
-            Ok((Operation::JoinSession(session_id, gamer_id), _len)) => {
+            Ok((Operation::JoinSession(session_id, gamer_id), ..)) => {
                 MGNServer::process_join_session(&mut writer, session_id, gamer_id, world_state)
                     .await;
+            }
+            Ok((Operation::StartSession(session_id), ..)) => {
+                MGNServer::process_start_session(&mut writer, session_id, world_state).await;
             }
             Err(err) => {
                 error!("Failed decoding input: {:?}", err);
@@ -208,8 +212,13 @@ impl MGNServer {
 
         {
             let mut state = world_state.lock().await;
-            let session = state.sessions[&session_id];
-            session.start();
+            state
+                .sessions
+                .get_mut(&session_id)
+                .map(|session| session.start())
+                .unwrap_or_else(|| {
+                    error!("Cannot start session {:?}, it does not exist", session_id);
+                });
         }
 
         let ok_encoded = bincode::encode_to_vec(Response::Ok, bincode::config::standard())
