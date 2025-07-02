@@ -1,3 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["example", "minignetclient", "minignetcommon", "minignetserver"]
+members = [
+  "example",
+  "example_torpedo",
+  "minignetclient",
+  "minignetcommon",
+  "minignetserver",
+]

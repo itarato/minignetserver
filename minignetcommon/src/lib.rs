@@ -40,6 +40,7 @@ pub enum Operation {
     StartSession(SessionIdType),
     EndSession(SessionIdType),
     IsGamerTurn(SessionIdType, GamerIdType),
+    IsGameOn(SessionIdType),
     SendUpdate(SessionIdType, GamerIdType, Vec<u8>),
     GetPreviousRoundUpdates(SessionIdType),
 }

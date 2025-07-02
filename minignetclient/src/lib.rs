@@ -8,6 +8,7 @@ use minignetcommon::{
 };
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
+#[derive(Clone)]
 pub struct MGNClient {
     serialization_config: bincode::config::Configuration,
     addr: SocketAddr,
@@ -88,6 +89,11 @@ impl MGNClient {
         gamer_id: GamerIdType,
     ) -> Result<Response, Error> {
         self.send_message_to_server(Operation::IsGamerTurn(session_id, gamer_id))
+            .await
+    }
+
+    pub async fn is_game_on(&self, session_id: SessionIdType) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::IsGameOn(session_id))
             .await
     }
 

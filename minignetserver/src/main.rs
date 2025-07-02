@@ -96,6 +96,10 @@ impl GameSession {
             .unwrap_or(false)
     }
 
+    pub(crate) fn is_game_on(&self) -> bool {
+        self.state == GameState::Game
+    }
+
     pub(crate) fn reset(&mut self) {
         self.state = GameState::Join;
         self.current_gamer_index = 0;
@@ -118,6 +122,19 @@ impl GameSession {
             self.state = GameState::Over;
         } else {
             error!("Ending a session that is not in GAME state");
+        }
+    }
+
+    pub(crate) fn add_update(&mut self, gamer_id: GamerIdType, update: Vec<u8>) -> bool {
+        match self.user_states.get_mut(&gamer_id) {
+            Some(user_state) => {
+                user_state.add_update(update);
+                true
+            }
+            None => {
+                error!("Gamer is missing missing");
+                false
+            }
         }
     }
 }
@@ -206,6 +223,9 @@ impl MGNServer {
                             world_state,
                         )
                         .await;
+                    }
+                    Operation::IsGameOn(session_id) => {
+                        MGNServer::process_is_game_on(&mut writer, session_id, world_state).await;
                     }
                     Operation::SendUpdate(session_id, gamer_id, update) => {
                         MGNServer::process_send_update(
@@ -330,6 +350,27 @@ impl MGNServer {
         }
 
         MGNServer::reply_client(writer, Response::Ok).await
+    }
+
+    async fn process_is_game_on(
+        writer: &mut WriteHalf<'_>,
+        session_id: SessionIdType,
+        world_state: Arc<Mutex<WorldState>>,
+    ) {
+        let is_game_on;
+        {
+            let mut state = world_state.lock().await;
+            is_game_on = match state.sessions.get_mut(&session_id) {
+                Some(session) => session.is_game_on(),
+                None => {
+                    error!("Missing session");
+                    MGNServer::reply_client(writer, Response::Error).await;
+                    return;
+                }
+            };
+        }
+
+        MGNServer::reply_client(writer, Response::OkWithBool(is_game_on)).await
     }
 
     async fn process_is_gamer_turn(

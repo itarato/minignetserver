@@ -1,0 +1,12 @@
+[package]
+name = "example_torpedo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+minignetcommon = { path = "../minignetcommon" }
+minignetclient = { path = "../minignetclient" }
+tokio = { version = "1.45", features = ["full"] }
+pretty_env_logger = "0.5.0"
+log = "0.4"
+clap = { version = "4.5.40", features = ["derive"] }

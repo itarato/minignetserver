@@ -30,6 +30,12 @@ async fn main() {
     dbg!(result);
 
     let result = client
+        .is_game_on("session_01".into())
+        .await
+        .expect("Failed is game on");
+    dbg!(result);
+
+    let result = client
         .is_gamer_turn("session_01".into(), "lennox".into())
         .await
         .expect("Failed is gamer turn");
