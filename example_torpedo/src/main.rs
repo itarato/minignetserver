@@ -1,7 +1,6 @@
 extern crate log;
 extern crate pretty_env_logger;
 
-use clap::builder::Str;
 use log::{error, warn};
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
@@ -54,6 +53,15 @@ impl InputParser {
             return Ok(InputCommand::Start);
         }
 
+        if let Some(caps) = regex::Regex::new(r"^([a-j]) (\d{1,2})$")
+            .unwrap()
+            .captures(&raw)
+        {
+            let col = caps.get(1).unwrap().as_str().chars().next().unwrap() as u8 - b'a';
+            let row: u8 = caps.get(2).unwrap().as_str().parse().unwrap();
+            return Ok(InputCommand::Step(Coord { x: col, y: row }));
+        }
+
         Err(format!("Unparsable command: {:?}", raw).into())
     }
 }
@@ -89,7 +97,7 @@ impl Game {
         }
     }
 
-    async fn run_init(&mut self) {
+    async fn run(&mut self) {
         self.cmd_queue
             .lock()
             .await
@@ -156,7 +164,16 @@ impl Game {
             match InputParser::parse(stdin_line) {
                 Ok(cmd) => match cmd {
                     InputCommand::Start => self.cmd_queue.lock().await.push_front(Command::Start),
-                    InputCommand::Step(Coord { x, y }) => unimplemented!(),
+                    InputCommand::Step(Coord { x, y }) => {
+                        match self
+                            .client
+                            .send_update(self.session_id.clone(), self.gamer_id.clone(), vec![x, y])
+                            .await
+                        {
+                            Ok(Response::Ok) => {}
+                            response => error!("Unexpected respone to update send: {:?}", response),
+                        }
+                    }
                 },
                 Err(err) => {
                     error!("Cannot parse command: {:?}", err);
@@ -283,6 +300,6 @@ async fn main() {
         event_queue,
         cmd_queue,
     )
-    .run_init()
+    .run()
     .await;
 }
