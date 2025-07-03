@@ -12,8 +12,8 @@ use tokio::{io::AsyncWriteExt, net::TcpStream};
 pub struct MGNClient {
     serialization_config: bincode::config::Configuration,
     addr: SocketAddr,
-    session_id: SessionIdType,
-    gamer_id: GamerIdType,
+    pub session_id: SessionIdType,
+    pub gamer_id: GamerIdType,
 }
 
 impl MGNClient {

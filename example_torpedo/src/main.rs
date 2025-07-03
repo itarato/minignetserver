@@ -1,12 +1,13 @@
 extern crate log;
 extern crate pretty_env_logger;
 
+use bincode::{Decode, Encode};
 use log::{error, warn};
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use clap::Parser;
 use minignetclient::MGNClient;
-use minignetcommon::{Error, GamerIdType, Response, SessionIdType};
+use minignetcommon::{Error, GamerIdType, Message, MessageAddress, Response, SessionIdType};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 
@@ -36,9 +37,16 @@ enum GameState {
     WaitForReply,
 }
 
+#[derive(Debug, Decode, Encode)]
 struct Coord {
     x: u8,
     y: u8,
+}
+
+#[derive(Debug, Decode, Encode)]
+enum TorpedoMessage {
+    Guess(Coord),
+    HitOrMissReply(Coord, bool),
 }
 
 enum InputCommand {
@@ -109,43 +117,35 @@ impl Game {
             self.consume_events().await;
 
             match self.state {
-                GameState::Initialize => {
-                    match self.client.is_game_on(self.session_id.clone()).await {
-                        Ok(Response::OkWithBool(is_game_on)) => {
-                            if is_game_on {
-                                self.state = GameState::OtherTurn;
-                            }
-                        }
-                        response => {
-                            warn!("Unexpected response for IS_GAME_ON: {:?}", response);
+                GameState::Initialize => match self.client.is_game_on().await {
+                    Ok(Response::OkWithBool(is_game_on)) => {
+                        if is_game_on {
+                            self.state = GameState::OtherTurn;
                         }
                     }
-                }
+                    response => {
+                        panic!("Unexpected response for IS_GAME_ON: {:?}", response);
+                    }
+                },
                 GameState::ReadyToGuess => {}
                 GameState::WaitForReply => {
                     // Wait for reply and the event handler will change state to
 
-                    self.cmd_queue
-                        .lock()
-                        .await
-                        .push_front(Command::WaitForTurn(false));
+                    // self.cmd_queue
+                    //     .lock()
+                    //     .await
+                    //     .push_front(Command::WaitForTurn(false));
                 }
-                GameState::OtherTurn => {
-                    match self
-                        .client
-                        .is_gamer_turn(self.session_id.clone(), self.gamer_id.clone())
-                        .await
-                    {
-                        Ok(Response::OkWithBool(is_gamer_turn)) => {
-                            if is_gamer_turn {
-                                self.state = GameState::ReadyToGuess;
-                            }
-                        }
-                        response => {
-                            warn!("Unexpected response for IS_GAMER_TURN: {:?}", response)
+                GameState::OtherTurn => match self.client.is_gamer_turn().await {
+                    Ok(Response::OkWithBool(is_gamer_turn)) => {
+                        if is_gamer_turn {
+                            self.state = GameState::ReadyToGuess;
                         }
                     }
-                }
+                    response => {
+                        panic!("Unexpected response for IS_GAMER_TURN: {:?}", response)
+                    }
+                },
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -168,14 +168,24 @@ impl Game {
             match InputParser::parse(stdin_line) {
                 Ok(cmd) => match cmd {
                     InputCommand::Start => self.cmd_queue.lock().await.push_front(Command::Start),
-                    InputCommand::Step(Coord { x, y }) => {
+                    InputCommand::Step(coord_guess) => {
                         match self
                             .client
-                            .send_update(self.session_id.clone(), self.gamer_id.clone(), vec![x, y])
+                            .send_message(Message {
+                                from: self.client.gamer_id.clone(),
+                                to: MessageAddress::All,
+                                payload: bincode::encode_to_vec(
+                                    TorpedoMessage::Guess(coord_guess),
+                                    bincode::config::standard(),
+                                )
+                                .expect("Failed encoding guess"),
+                            })
                             .await
                         {
-                            Ok(Response::Ok) => {}
-                            response => error!("Unexpected respone to update send: {:?}", response),
+                            Ok(Response::Ok) => {
+                                self.state = GameState::WaitForReply;
+                            }
+                            response => panic!("Unexpected respone to update send: {:?}", response),
                         }
                     }
                 },
@@ -199,6 +209,30 @@ impl Game {
                         self.state = GameState::OtherTurn;
                     }
                 }
+                Event::GotGuess(coord) => {
+                    let is_hit = coord.x == 1 && coord.y == 1;
+                    match self
+                        .client
+                        .send_message(Message {
+                            from: self.client.gamer_id.clone(),
+                            to: MessageAddress::All,
+                            payload: bincode::encode_to_vec(
+                                TorpedoMessage::HitOrMissReply(coord, is_hit),
+                                bincode::config::standard(),
+                            )
+                            .expect("Failed encoding hit of miss reply message"),
+                        })
+                        .await
+                    {
+                        Ok(Response::Ok) => { /* noop */ }
+                        response => {
+                            panic!("Unexpected response to send message: {:?}", response);
+                        }
+                    }
+                }
+                Event::GotReplyToGuess(guess, is_hit) => {
+                    unimplemented!()
+                }
             }
         }
     }
@@ -206,6 +240,8 @@ impl Game {
 
 enum Event {
     TurnIsActive(bool),
+    GotGuess(Coord),
+    GotReplyToGuess(Coord, bool),
 }
 
 enum Command {
@@ -218,25 +254,39 @@ enum BackgroundState {
     WaitForTurn(bool),
 }
 
-async fn read_all_messages(
-    client: &MGNClient,
-    session_id: SessionIdType,
-    gamer_id: GamerIdType,
-) -> Vec<_> {
-    unimplemented!()
+async fn read_all_messages(client: &MGNClient) -> Vec<Message> {
+    match client.fetch_all_messages().await {
+        Ok(Response::OkWithMessages(messages)) => messages,
+        response => {
+            error!(
+                "Unexpected response {:?} for fetching all messages",
+                response
+            );
+            vec![]
+        }
+    }
 }
 
 async fn background_thread(
     client: MGNClient,
-    session_id: SessionIdType,
-    gamer_id: GamerIdType,
     event_queue: Arc<Mutex<VecDeque<Event>>>,
     cmd_queue: Arc<Mutex<VecDeque<Command>>>,
 ) {
     let mut state = BackgroundState::WaitingForCommand;
 
     loop {
-        for msg in read_all_messages(&client, session_id.clone(), gamer_id.clone()).await {}
+        for message in read_all_messages(&client).await {
+            let (torpedo_message, _size): (TorpedoMessage, _) =
+                bincode::decode_from_slice(&message.payload, bincode::config::standard())
+                    .expect("Failed decoding message payload");
+
+            match torpedo_message {
+                TorpedoMessage::Guess(coord) => {
+                    event_queue.lock().await.push_front(Event::GotGuess(coord));
+                }
+                TorpedoMessage::HitOrMissReply(coord, is_hit) => unimplemented!(),
+            }
+        }
 
         match state {
             BackgroundState::WaitingForCommand => {
@@ -244,7 +294,7 @@ async fn background_thread(
                 while let Some(cmd) = _cmd_queue.pop_back() {
                     match cmd {
                         Command::Start => {
-                            if let Err(err) = client.start_session(session_id.clone()).await {
+                            if let Err(err) = client.start_session().await {
                                 error!("Cannot start session: {:?}", err);
                             }
                         }
@@ -255,16 +305,15 @@ async fn background_thread(
                 }
             }
             BackgroundState::WaitForTurn(is_self) => {
-                match client
-                    .is_gamer_turn(session_id.clone(), gamer_id.clone())
-                    .await
-                {
+                match client.is_gamer_turn().await {
                     Ok(response) => match response {
                         minignetcommon::Response::OkWithBool(is_my_turn) => {
                             if is_my_turn == is_self {
                                 state = BackgroundState::WaitingForCommand;
-                                let mut _event_queue = event_queue.lock().await;
-                                _event_queue.push_front(Event::TurnIsActive(is_my_turn));
+                                event_queue
+                                    .lock()
+                                    .await
+                                    .push_front(Event::TurnIsActive(is_my_turn));
                             }
                         }
                         _ => warn!("Unexpected response: {:?}", response),
@@ -294,18 +343,12 @@ async fn main() {
 
     let event_queue_clone = event_queue.clone();
     let cmd_queue_clone = cmd_queue.clone();
-    let client = MGNClient::new(cmd_line_args.server).unwrap();
+    let client = MGNClient::new(cmd_line_args.server, session_id, gamer_id).unwrap();
     let client_clone = client.clone();
 
-    tokio::spawn(async move {
-        background_thread(
-            client_clone,
-            session_id,
-            gamer_id,
-            event_queue_clone,
-            cmd_queue_clone,
-        )
-    });
+    tokio::spawn(
+        async move { background_thread(client_clone, event_queue_clone, cmd_queue_clone) },
+    );
 
     Game::new(
         client,

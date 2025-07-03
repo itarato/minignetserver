@@ -209,6 +209,7 @@ dependencies = [
 name = "example_torpedo"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "clap",
  "log",
  "minignetclient",
