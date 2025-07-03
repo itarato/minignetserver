@@ -3,6 +3,7 @@ extern crate pretty_env_logger;
 
 use log::info;
 use minignetclient::MGNClient;
+use minignetcommon::{Message, MessageAddress};
 
 #[tokio::main]
 async fn main() {
@@ -51,6 +52,25 @@ async fn main() {
         .get_previous_round_updates("session_01".into())
         .await
         .expect("Failed getting previous round updates");
+    dbg!(result);
+
+    let result = client
+        .send_message(
+            "session_01".into(),
+            Message {
+                from: "lennox".into(),
+                to: MessageAddress::One("lennox".into()),
+                payload: vec![2, 6, 8],
+            },
+        )
+        .await
+        .expect("Failed sending message");
+    dbg!(result);
+
+    let result = client
+        .fetch_all_messages("session_01".into(), "lennox".into())
+        .await
+        .expect("Failed fetching all messages");
     dbg!(result);
 
     let result = client

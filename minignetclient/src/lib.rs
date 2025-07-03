@@ -4,7 +4,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 
 use log::error;
 use minignetcommon::{
-    Error, GamerIdType, Operation, Response, SessionIdType, read_socket_till_end,
+    Error, GamerIdType, Message, Operation, Response, SessionIdType, read_socket_till_end,
 };
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
@@ -112,6 +112,24 @@ impl MGNClient {
         session_id: SessionIdType,
     ) -> Result<Response, Error> {
         self.send_message_to_server(Operation::GetPreviousRoundUpdates(session_id))
+            .await
+    }
+
+    pub async fn send_message(
+        &self,
+        session_id: SessionIdType,
+        message: Message,
+    ) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::SendMessage(session_id, message))
+            .await
+    }
+
+    pub async fn fetch_all_messages(
+        &self,
+        session_id: SessionIdType,
+        gamer_id: GamerIdType,
+    ) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::FetchAllMessages(session_id, gamer_id))
             .await
     }
 }

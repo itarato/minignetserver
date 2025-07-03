@@ -33,6 +33,19 @@ pub async fn read_socket_till_end(reader: &mut ReadHalf<'_>) -> Result<Vec<u8>, 
     }
 }
 
+#[derive(Debug, Decode, Encode, Clone)]
+pub enum MessageAddress {
+    All,
+    One(GamerIdType),
+}
+
+#[derive(Debug, Decode, Encode, Clone)]
+pub struct Message {
+    pub from: GamerIdType,
+    pub to: MessageAddress,
+    pub payload: Vec<u8>,
+}
+
 #[derive(Debug, Decode, Encode)]
 pub enum Operation {
     JoinSession(SessionIdType, GamerIdType),
@@ -43,6 +56,8 @@ pub enum Operation {
     IsGameOn(SessionIdType),
     SendUpdate(SessionIdType, GamerIdType, Vec<u8>),
     GetPreviousRoundUpdates(SessionIdType),
+    SendMessage(SessionIdType, Message),
+    FetchAllMessages(SessionIdType, GamerIdType),
 }
 
 #[derive(Debug, Decode, Encode, Clone)]
@@ -51,4 +66,5 @@ pub enum Response {
     Error,
     OkWithBool(bool),
     OkWithPreviousRoundUpdates(HashMap<GamerIdType, Option<Vec<u8>>>),
+    OkWithMessages(Vec<Message>),
 }

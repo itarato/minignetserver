@@ -31,8 +31,9 @@ enum CellState {
 
 enum GameState {
     Initialize,
-    SelfTurn,
+    ReadyToGuess,
     OtherTurn,
+    WaitForReply,
 }
 
 struct Coord {
@@ -104,7 +105,7 @@ impl Game {
             .push_front(Command::WaitForTurn(true));
 
         loop {
-            self.execute_command_if_any().await;
+            self.execute_input_command_if_any().await;
             self.consume_events().await;
 
             match self.state {
@@ -120,7 +121,10 @@ impl Game {
                         }
                     }
                 }
-                GameState::SelfTurn => {
+                GameState::ReadyToGuess => {}
+                GameState::WaitForReply => {
+                    // Wait for reply and the event handler will change state to
+
                     self.cmd_queue
                         .lock()
                         .await
@@ -134,7 +138,7 @@ impl Game {
                     {
                         Ok(Response::OkWithBool(is_gamer_turn)) => {
                             if is_gamer_turn {
-                                self.state = GameState::SelfTurn;
+                                self.state = GameState::ReadyToGuess;
                             }
                         }
                         response => {
@@ -159,7 +163,7 @@ impl Game {
         }
     }
 
-    async fn execute_command_if_any(&mut self) -> bool {
+    async fn execute_input_command_if_any(&mut self) -> bool {
         if let Some(stdin_line) = Game::read_stdin_line().await {
             match InputParser::parse(stdin_line) {
                 Ok(cmd) => match cmd {
@@ -190,7 +194,7 @@ impl Game {
             match event {
                 Event::TurnIsActive(is_self) => {
                     if is_self {
-                        self.state = GameState::SelfTurn;
+                        self.state = GameState::ReadyToGuess;
                     } else {
                         self.state = GameState::OtherTurn;
                     }
@@ -214,6 +218,14 @@ enum BackgroundState {
     WaitForTurn(bool),
 }
 
+async fn read_all_messages(
+    client: &MGNClient,
+    session_id: SessionIdType,
+    gamer_id: GamerIdType,
+) -> Vec<_> {
+    unimplemented!()
+}
+
 async fn background_thread(
     client: MGNClient,
     session_id: SessionIdType,
@@ -224,6 +236,8 @@ async fn background_thread(
     let mut state = BackgroundState::WaitingForCommand;
 
     loop {
+        for msg in read_all_messages(&client, session_id.clone(), gamer_id.clone()).await {}
+
         match state {
             BackgroundState::WaitingForCommand => {
                 let mut _cmd_queue = cmd_queue.lock().await;

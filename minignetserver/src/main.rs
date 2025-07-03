@@ -4,7 +4,7 @@ extern crate pretty_env_logger;
 use std::{collections::HashMap, sync::Arc};
 
 use log::{error, info};
-use minignetcommon::{GamerIdType, Operation, Response, SessionIdType};
+use minignetcommon::{GamerIdType, Message, MessageAddress, Operation, Response, SessionIdType};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, tcp::WriteHalf},
@@ -16,20 +16,12 @@ pub(crate) struct UserUpdate {
     pub update: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct UserState {
-    gamer_id: GamerIdType,
     updates: Vec<UserUpdate>,
 }
 
 impl UserState {
-    pub(crate) fn new(gamer_id: GamerIdType) -> Self {
-        Self {
-            gamer_id,
-            updates: Default::default(),
-        }
-    }
-
     pub(crate) fn add_update(&mut self, update: Vec<u8>) {
         self.updates.push(UserUpdate { update });
     }
@@ -48,21 +40,21 @@ pub(crate) enum GameState {
 
 #[derive(Debug)]
 pub(crate) struct GameSession {
-    session_id: SessionIdType,
     user_states: HashMap<GamerIdType, UserState>,
     sequence: Vec<GamerIdType>,
     current_gamer_index: usize,
     state: GameState,
+    awaiting_messages: HashMap<GamerIdType, Vec<Message>>,
 }
 
 impl GameSession {
-    pub(crate) fn new(session_id: SessionIdType) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            session_id,
             user_states: HashMap::new(),
             current_gamer_index: 0,
             state: GameState::Join,
             sequence: vec![],
+            awaiting_messages: HashMap::new(),
         }
     }
 
@@ -73,13 +65,8 @@ impl GameSession {
             return;
         }
 
-        self.user_states.insert(
-            gamer_id.clone(),
-            UserState {
-                gamer_id: gamer_id.clone(),
-                updates: Default::default(),
-            },
-        );
+        self.user_states
+            .insert(gamer_id.clone(), UserState::default());
 
         self.sequence.push(gamer_id);
     }
@@ -136,6 +123,40 @@ impl GameSession {
                 false
             }
         }
+    }
+
+    pub(crate) fn save_message(&mut self, message: Message) {
+        match &message.to {
+            MessageAddress::All => {
+                for gamer_id in &self.sequence {
+                    if gamer_id == &message.from {
+                        continue;
+                    }
+
+                    self.awaiting_messages
+                        .entry(gamer_id.clone())
+                        .or_default()
+                        .push(message.clone());
+                }
+            }
+            MessageAddress::One(gamer_id) => {
+                self.awaiting_messages
+                    .entry(gamer_id.clone())
+                    .or_default()
+                    .push(message.clone());
+            }
+        }
+    }
+
+    pub(crate) fn pop_gamer_messages(&mut self, gamer_id: GamerIdType) -> Vec<Message> {
+        self.awaiting_messages
+            .get_mut(&gamer_id)
+            .map(|mut messages| {
+                let mut out_messages = vec![];
+                std::mem::swap(&mut out_messages, &mut messages);
+                out_messages
+            })
+            .unwrap_or(vec![])
     }
 }
 
@@ -245,6 +266,24 @@ impl MGNServer {
                         )
                         .await;
                     }
+                    Operation::SendMessage(session_id, message) => {
+                        MGNServer::process_send_message(
+                            &mut writer,
+                            session_id,
+                            message,
+                            world_state,
+                        )
+                        .await;
+                    }
+                    Operation::FetchAllMessages(session_id, gamer_id) => {
+                        MGNServer::process_fetch_all_messages(
+                            &mut writer,
+                            session_id,
+                            gamer_id,
+                            world_state,
+                        )
+                        .await;
+                    }
                 };
             }
             Err(err) => {
@@ -284,7 +323,7 @@ impl MGNServer {
             let session = state
                 .sessions
                 .entry(session_id.clone())
-                .or_insert(GameSession::new(session_id));
+                .or_insert(GameSession::new());
 
             session.join(gamer_id);
         }
@@ -459,6 +498,47 @@ impl MGNServer {
             Response::OkWithPreviousRoundUpdates(previous_round_updates),
         )
         .await
+    }
+
+    async fn process_send_message(
+        writer: &mut WriteHalf<'_>,
+        session_id: SessionIdType,
+        message: Message,
+        world_state: Arc<Mutex<WorldState>>,
+    ) {
+        let mut state = world_state.lock().await;
+        let session = match state.sessions.get_mut(&session_id) {
+            Some(session) => session,
+            None => {
+                error!("Session is missing");
+                MGNServer::reply_client(writer, Response::Error).await;
+                return;
+            }
+        };
+
+        session.save_message(message);
+
+        MGNServer::reply_client(writer, Response::Ok).await
+    }
+
+    async fn process_fetch_all_messages(
+        writer: &mut WriteHalf<'_>,
+        session_id: SessionIdType,
+        gamer_id: GamerIdType,
+        world_state: Arc<Mutex<WorldState>>,
+    ) {
+        let mut state = world_state.lock().await;
+        let session = match state.sessions.get_mut(&session_id) {
+            Some(session) => session,
+            None => {
+                error!("Session is missing");
+                MGNServer::reply_client(writer, Response::Error).await;
+                return;
+            }
+        };
+
+        let messages = session.pop_gamer_messages(gamer_id);
+        MGNServer::reply_client(writer, Response::OkWithMessages(messages)).await
     }
 }
 
