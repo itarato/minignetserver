@@ -19,6 +19,7 @@ pub(crate) struct UserUpdate {
 #[derive(Debug, Default)]
 pub(crate) struct UserState {
     updates: Vec<UserUpdate>,
+    awaiting_messages: Vec<Message>,
 }
 
 impl UserState {
@@ -44,7 +45,6 @@ pub(crate) struct GameSession {
     sequence: Vec<GamerIdType>,
     current_gamer_index: usize,
     state: GameState,
-    awaiting_messages: HashMap<GamerIdType, Vec<Message>>,
 }
 
 impl GameSession {
@@ -54,7 +54,6 @@ impl GameSession {
             current_gamer_index: 0,
             state: GameState::Join,
             sequence: vec![],
-            awaiting_messages: HashMap::new(),
         }
     }
 
@@ -133,27 +132,29 @@ impl GameSession {
                         continue;
                     }
 
-                    self.awaiting_messages
-                        .entry(gamer_id.clone())
-                        .or_default()
+                    self.user_states
+                        .get_mut(gamer_id)
+                        .expect("Missing user state")
+                        .awaiting_messages
                         .push(message.clone());
                 }
             }
             MessageAddress::One(gamer_id) => {
-                self.awaiting_messages
-                    .entry(gamer_id.clone())
-                    .or_default()
+                self.user_states
+                    .get_mut(gamer_id)
+                    .expect("Missing user state")
+                    .awaiting_messages
                     .push(message.clone());
             }
         }
     }
 
     pub(crate) fn pop_gamer_messages(&mut self, gamer_id: GamerIdType) -> Vec<Message> {
-        self.awaiting_messages
+        self.user_states
             .get_mut(&gamer_id)
-            .map(|mut messages| {
+            .map(|user_state| {
                 let mut out_messages = vec![];
-                std::mem::swap(&mut out_messages, &mut messages);
+                std::mem::swap(&mut out_messages, &mut user_state.awaiting_messages);
                 out_messages
             })
             .unwrap_or(vec![])
