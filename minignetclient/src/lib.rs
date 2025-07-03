@@ -12,10 +12,16 @@ use tokio::{io::AsyncWriteExt, net::TcpStream};
 pub struct MGNClient {
     serialization_config: bincode::config::Configuration,
     addr: SocketAddr,
+    session_id: SessionIdType,
+    gamer_id: GamerIdType,
 }
 
 impl MGNClient {
-    pub fn new<Addr>(addr: Addr) -> Result<Self, std::io::Error>
+    pub fn new<Addr>(
+        addr: Addr,
+        session_id: SessionIdType,
+        gamer_id: GamerIdType,
+    ) -> Result<Self, std::io::Error>
     where
         Addr: ToSocketAddrs,
     {
@@ -28,6 +34,8 @@ impl MGNClient {
         Ok(Self {
             serialization_config: bincode::config::standard(),
             addr: first_address,
+            session_id,
+            gamer_id,
         })
     }
 
@@ -59,77 +67,66 @@ impl MGNClient {
         }
     }
 
-    pub async fn join_session(
-        &self,
-        session_id: SessionIdType,
-        gamer_id: GamerIdType,
-    ) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::JoinSession(session_id, gamer_id))
+    pub async fn join_session(&self) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::JoinSession(
+            self.session_id.clone(),
+            self.gamer_id.clone(),
+        ))
+        .await
+    }
+
+    pub async fn reset_session(&self) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::ResetSession(self.session_id.clone()))
             .await
     }
 
-    pub async fn reset_session(&self, session_id: SessionIdType) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::ResetSession(session_id))
+    pub async fn start_session(&self) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::StartSession(self.session_id.clone()))
             .await
     }
 
-    pub async fn start_session(&self, session_id: SessionIdType) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::StartSession(session_id))
+    pub async fn end_session(&self) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::EndSession(self.session_id.clone()))
             .await
     }
 
-    pub async fn end_session(&self, session_id: SessionIdType) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::EndSession(session_id))
+    pub async fn is_gamer_turn(&self) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::IsGamerTurn(
+            self.session_id.clone(),
+            self.gamer_id.clone(),
+        ))
+        .await
+    }
+
+    pub async fn is_game_on(&self) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::IsGameOn(self.session_id.clone()))
             .await
     }
 
-    pub async fn is_gamer_turn(
-        &self,
-        session_id: SessionIdType,
-        gamer_id: GamerIdType,
-    ) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::IsGamerTurn(session_id, gamer_id))
+    pub async fn send_update(&self, update: Vec<u8>) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::SendUpdate(
+            self.session_id.clone(),
+            self.gamer_id.clone(),
+            update,
+        ))
+        .await
+    }
+
+    pub async fn get_previous_round_updates(&self) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::GetPreviousRoundUpdates(self.session_id.clone()))
             .await
     }
 
-    pub async fn is_game_on(&self, session_id: SessionIdType) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::IsGameOn(session_id))
+    pub async fn send_message(&self, message: Message) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::SendMessage(self.session_id.clone(), message))
             .await
     }
 
-    pub async fn send_update(
-        &self,
-        session_id: SessionIdType,
-        gamer_id: GamerIdType,
-        update: Vec<u8>,
-    ) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::SendUpdate(session_id, gamer_id, update))
-            .await
-    }
-
-    pub async fn get_previous_round_updates(
-        &self,
-        session_id: SessionIdType,
-    ) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::GetPreviousRoundUpdates(session_id))
-            .await
-    }
-
-    pub async fn send_message(
-        &self,
-        session_id: SessionIdType,
-        message: Message,
-    ) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::SendMessage(session_id, message))
-            .await
-    }
-
-    pub async fn fetch_all_messages(
-        &self,
-        session_id: SessionIdType,
-        gamer_id: GamerIdType,
-    ) -> Result<Response, Error> {
-        self.send_message_to_server(Operation::FetchAllMessages(session_id, gamer_id))
-            .await
+    pub async fn fetch_all_messages(&self) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::FetchAllMessages(
+            self.session_id.clone(),
+            self.gamer_id.clone(),
+        ))
+        .await
     }
 }
