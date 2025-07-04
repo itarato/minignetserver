@@ -98,6 +98,7 @@ impl GameSession {
     pub(crate) fn start(&mut self) {
         if self.state == GameState::Join {
             self.state = GameState::Game;
+            info!("Session has started");
         } else {
             error!("Starting a session that is not in JOIN state");
         }
@@ -158,6 +159,10 @@ impl GameSession {
                 out_messages
             })
             .unwrap_or(vec![])
+    }
+
+    pub(crate) fn next_gamer(&mut self) {
+        self.current_gamer_index = (self.current_gamer_index + 1) % self.sequence.len();
     }
 }
 
@@ -284,6 +289,9 @@ impl MGNServer {
                             world_state,
                         )
                         .await;
+                    }
+                    Operation::NextGamer(session_id) => {
+                        MGNServer::process_next_gamer(&mut writer, session_id, world_state).await;
                     }
                 };
             }
@@ -540,6 +548,26 @@ impl MGNServer {
 
         let messages = session.pop_gamer_messages(gamer_id);
         MGNServer::reply_client(writer, Response::OkWithMessages(messages)).await
+    }
+
+    async fn process_next_gamer(
+        writer: &mut WriteHalf<'_>,
+        session_id: SessionIdType,
+        world_state: Arc<Mutex<WorldState>>,
+    ) {
+        let mut state = world_state.lock().await;
+        let session = match state.sessions.get_mut(&session_id) {
+            Some(session) => session,
+            None => {
+                error!("Session is missing");
+                MGNServer::reply_client(writer, Response::Error).await;
+                return;
+            }
+        };
+
+        session.next_gamer();
+
+        MGNServer::reply_client(writer, Response::Ok).await
     }
 }
 

@@ -2,7 +2,7 @@ extern crate log;
 extern crate pretty_env_logger;
 
 use bincode::{Decode, Encode};
-use log::{error, warn};
+use log::{error, info, warn};
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use clap::Parser;
@@ -80,8 +80,6 @@ struct Game {
     other_board: [CellState; 100],
     state: GameState,
     client: MGNClient,
-    session_id: SessionIdType,
-    gamer_id: GamerIdType,
     event_queue: Arc<Mutex<VecDeque<Event>>>,
     cmd_queue: Arc<Mutex<VecDeque<Command>>>,
 }
@@ -89,8 +87,6 @@ struct Game {
 impl Game {
     fn new(
         client: MGNClient,
-        session_id: SessionIdType,
-        gamer_id: GamerIdType,
         event_queue: Arc<Mutex<VecDeque<Event>>>,
         cmd_queue: Arc<Mutex<VecDeque<Command>>>,
     ) -> Self {
@@ -99,19 +95,24 @@ impl Game {
             other_board: [CellState::Undiscovered; 100],
             state: GameState::Initialize,
             client,
-            session_id,
-            gamer_id,
             event_queue,
             cmd_queue,
         }
     }
 
-    async fn run(&mut self) {
+    async fn init(&self) {
+        match self.client.join_session().await {
+            Ok(Response::Ok) => info!("Joined session"),
+            response => panic!("Unexpected response for join: {:?}", response),
+        }
+
         self.cmd_queue
             .lock()
             .await
             .push_front(Command::WaitForTurn(true));
+    }
 
+    async fn run(&mut self) {
         loop {
             self.execute_input_command_if_any().await;
             self.consume_events().await;
@@ -128,14 +129,7 @@ impl Game {
                     }
                 },
                 GameState::ReadyToGuess => {}
-                GameState::WaitForReply => {
-                    // Wait for reply and the event handler will change state to
-
-                    // self.cmd_queue
-                    //     .lock()
-                    //     .await
-                    //     .push_front(Command::WaitForTurn(false));
-                }
+                GameState::WaitForReply => {}
                 GameState::OtherTurn => match self.client.is_gamer_turn().await {
                     Ok(Response::OkWithBool(is_gamer_turn)) => {
                         if is_gamer_turn {
@@ -148,10 +142,8 @@ impl Game {
                 },
             }
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-
-        unimplemented!()
     }
 
     async fn read_stdin_line() -> Option<String> {
@@ -163,8 +155,11 @@ impl Game {
         }
     }
 
-    async fn execute_input_command_if_any(&mut self) -> bool {
+    async fn execute_input_command_if_any(&mut self) {
+        info!("CHECK INPUT");
         if let Some(stdin_line) = Game::read_stdin_line().await {
+            info!("Got raw input: {}", stdin_line);
+
             match InputParser::parse(stdin_line) {
                 Ok(cmd) => match cmd {
                     InputCommand::Start => self.cmd_queue.lock().await.push_front(Command::Start),
@@ -194,13 +189,14 @@ impl Game {
                 }
             }
         }
-
-        false
     }
 
     async fn consume_events(&mut self) {
+        info!("CHECK EVENTS");
         let mut _event_queue = self.event_queue.lock().await;
         while let Some(event) = _event_queue.pop_back() {
+            info!("Got event: {:?}", &event);
+
             match event {
                 Event::TurnIsActive(is_self) => {
                     if is_self {
@@ -231,26 +227,39 @@ impl Game {
                     }
                 }
                 Event::GotReplyToGuess(guess, is_hit) => {
-                    unimplemented!()
+                    // TODO - save it
+                    match self.client.next_gamer().await {
+                        Ok(Response::Ok) => {
+                            self.cmd_queue
+                                .lock()
+                                .await
+                                .push_front(Command::WaitForTurn(false));
+                        }
+                        response => {
+                            panic!("Unexpected response to NEXT-GAMER: {:?}", response);
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+#[derive(Debug)]
 enum Event {
     TurnIsActive(bool),
     GotGuess(Coord),
     GotReplyToGuess(Coord, bool),
 }
 
+#[derive(Debug)]
 enum Command {
     Start,
     WaitForTurn(bool),
 }
 
 enum BackgroundState {
-    WaitingForCommand,
+    Idle,
     WaitForTurn(bool),
 }
 
@@ -272,7 +281,8 @@ async fn background_thread(
     event_queue: Arc<Mutex<VecDeque<Event>>>,
     cmd_queue: Arc<Mutex<VecDeque<Command>>>,
 ) {
-    let mut state = BackgroundState::WaitingForCommand;
+    info!("Background thread has started");
+    let mut state = BackgroundState::Idle;
 
     loop {
         for message in read_all_messages(&client).await {
@@ -280,59 +290,68 @@ async fn background_thread(
                 bincode::decode_from_slice(&message.payload, bincode::config::standard())
                     .expect("Failed decoding message payload");
 
+            info!("Got message: {:?}", &torpedo_message);
+
             match torpedo_message {
                 TorpedoMessage::Guess(coord) => {
                     event_queue.lock().await.push_front(Event::GotGuess(coord));
                 }
-                TorpedoMessage::HitOrMissReply(coord, is_hit) => unimplemented!(),
+                TorpedoMessage::HitOrMissReply(coord, is_hit) => {
+                    event_queue
+                        .lock()
+                        .await
+                        .push_front(Event::GotReplyToGuess(coord, is_hit));
+                }
+            }
+        }
+
+        let mut _cmd_queue = cmd_queue.lock().await;
+        while let Some(cmd) = _cmd_queue.pop_back() {
+            info!("Got command: {:?}", &cmd);
+
+            match cmd {
+                Command::Start => match client.start_session().await {
+                    Ok(Response::Ok) => info!("Session start requested"),
+                    response => {
+                        panic!("Unexpected response for session start: {:?}", response)
+                    }
+                },
+                Command::WaitForTurn(is_self) => {
+                    state = BackgroundState::WaitForTurn(is_self);
+                }
             }
         }
 
         match state {
-            BackgroundState::WaitingForCommand => {
-                let mut _cmd_queue = cmd_queue.lock().await;
-                while let Some(cmd) = _cmd_queue.pop_back() {
-                    match cmd {
-                        Command::Start => {
-                            if let Err(err) = client.start_session().await {
-                                error!("Cannot start session: {:?}", err);
-                            }
-                        }
-                        Command::WaitForTurn(is_self) => {
-                            state = BackgroundState::WaitForTurn(is_self);
+            BackgroundState::Idle => {}
+            BackgroundState::WaitForTurn(expectation) => match client.is_gamer_turn().await {
+                Ok(response) => match response {
+                    minignetcommon::Response::OkWithBool(is_my_turn) => {
+                        info!("IS-MY-TURN response: {}", is_my_turn);
+                        if is_my_turn == expectation {
+                            state = BackgroundState::Idle;
+                            event_queue
+                                .lock()
+                                .await
+                                .push_front(Event::TurnIsActive(is_my_turn));
                         }
                     }
+                    _ => panic!("Unexpected response to IS-GAMER-TURN: {:?}", response),
+                },
+                Err(_) => {
+                    panic!("Error while checking turn");
                 }
-            }
-            BackgroundState::WaitForTurn(is_self) => {
-                match client.is_gamer_turn().await {
-                    Ok(response) => match response {
-                        minignetcommon::Response::OkWithBool(is_my_turn) => {
-                            if is_my_turn == is_self {
-                                state = BackgroundState::WaitingForCommand;
-                                event_queue
-                                    .lock()
-                                    .await
-                                    .push_front(Event::TurnIsActive(is_my_turn));
-                            }
-                        }
-                        _ => warn!("Unexpected response: {:?}", response),
-                    },
-                    Err(_) => {
-                        error!("Error while checking turn");
-                        // ??? Should we send an error-event to the game?
-                    }
-                }
-            }
+            },
         }
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
+    info!("Torpedo starts");
 
     let cmd_line_args = CmdLineArgs::parse();
     let event_queue: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -346,17 +365,12 @@ async fn main() {
     let client = MGNClient::new(cmd_line_args.server, session_id, gamer_id).unwrap();
     let client_clone = client.clone();
 
-    tokio::spawn(
-        async move { background_thread(client_clone, event_queue_clone, cmd_queue_clone) },
-    );
+    let mut game = Game::new(client, event_queue, cmd_queue);
+    game.init().await;
 
-    Game::new(
-        client,
-        cmd_line_args.session_id,
-        cmd_line_args.gamer_id,
-        event_queue,
-        cmd_queue,
-    )
-    .run()
-    .await;
+    tokio::spawn(async move {
+        background_thread(client_clone, event_queue_clone, cmd_queue_clone).await;
+    });
+
+    game.run().await;
 }

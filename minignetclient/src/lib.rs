@@ -129,4 +129,9 @@ impl MGNClient {
         ))
         .await
     }
+
+    pub async fn next_gamer(&self) -> Result<Response, Error> {
+        self.send_message_to_server(Operation::NextGamer(self.session_id.clone()))
+            .await
+    }
 }

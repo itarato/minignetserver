@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bincode::{Decode, Encode};
 
-use log::{error, info};
+use log::{error, trace};
 use tokio::{io::AsyncReadExt, net::tcp::ReadHalf};
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -18,12 +18,12 @@ pub async fn read_socket_till_end(reader: &mut ReadHalf<'_>) -> Result<Vec<u8>, 
         match reader.read(&mut buf).await {
             Ok(size) => {
                 if size == 0 {
-                    info!("Connection closed");
+                    trace!("Connection closed");
                     return Ok(bytes);
                 }
 
                 bytes.extend_from_slice(&buf[0..size]);
-                info!("Received {} bytes", size);
+                trace!("Received {} bytes", size);
             }
             Err(err) => {
                 error!("Error while reading: {:?}", err);
@@ -53,6 +53,7 @@ pub enum Operation {
     StartSession(SessionIdType),
     EndSession(SessionIdType),
     IsGamerTurn(SessionIdType, GamerIdType),
+    NextGamer(SessionIdType),
     IsGameOn(SessionIdType),
     SendUpdate(SessionIdType, GamerIdType, Vec<u8>),
     GetPreviousRoundUpdates(SessionIdType),
