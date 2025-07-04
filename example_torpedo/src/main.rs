@@ -30,14 +30,6 @@ enum CellState {
     Miss,
 }
 
-#[derive(Debug)]
-enum GameState {
-    Initialize,
-    ReadyToGuess,
-    OtherTurn,
-    WaitForReply,
-}
-
 #[derive(Debug, Decode, Encode)]
 struct Coord {
     x: u8,
@@ -79,7 +71,6 @@ impl InputParser {
 struct Game {
     self_board: [CellState; 100],
     other_board: [CellState; 100],
-    state: GameState,
     client: MGNClient,
     event_queue: Arc<Mutex<VecDeque<Event>>>,
     cmd_queue: Arc<Mutex<VecDeque<Command>>>,
@@ -94,7 +85,6 @@ impl Game {
         Self {
             self_board: [CellState::Undiscovered; 100],
             other_board: [CellState::Undiscovered; 100],
-            state: GameState::Initialize,
             client,
             event_queue,
             cmd_queue,
@@ -110,45 +100,12 @@ impl Game {
         self.cmd_queue
             .lock()
             .await
-            .push_front(Command::WaitForTurn(true));
-    }
-
-    fn state_transition(&mut self, to: GameState) {
-        info!("State change from {:?} to {:?}", self.state, to);
-        self.state = to;
+            .push_front(Command::WaitForGameOn);
     }
 
     async fn run(&mut self) {
         loop {
             self.consume_events().await;
-
-            match self.state {
-                GameState::Initialize => match self.client.is_game_on().await {
-                    Ok(Response::OkWithBool(is_game_on)) => {
-                        if is_game_on {
-                            self.state_transition(GameState::OtherTurn);
-                        }
-                    }
-                    response => {
-                        panic!("Unexpected response for IS_GAME_ON: {:?}", response);
-                    }
-                },
-                GameState::ReadyToGuess => {}
-                GameState::WaitForReply => {}
-                GameState::OtherTurn => {
-                    //     match self.client.is_gamer_turn().await {
-                    //     Ok(Response::OkWithBool(is_gamer_turn)) => {
-                    //         if is_gamer_turn {
-                    //             self.state_transition(GameState::ReadyToGuess);
-                    //         }
-                    //     }
-                    //     response => {
-                    //         panic!("Unexpected response for IS_GAMER_TURN: {:?}", response)
-                    //     }
-                    // };
-                }
-            }
-
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
@@ -161,11 +118,18 @@ impl Game {
                 info!("Got event: {:?}", &event);
 
                 match event {
+                    Event::GameIsActive => {
+                        self.cmd_queue
+                            .lock()
+                            .await
+                            .push_front(Command::WaitForTurn(true));
+                    }
                     Event::TurnIsActive(is_self) => {
-                        if is_self {
-                            self.state_transition(GameState::ReadyToGuess);
-                        } else {
-                            self.state_transition(GameState::OtherTurn);
+                        if !is_self {
+                            self.cmd_queue
+                                .lock()
+                                .await
+                                .push_front(Command::WaitForTurn(true));
                         }
                     }
                     Event::GotGuess(coord) => {
@@ -217,9 +181,7 @@ impl Game {
                             })
                             .await
                         {
-                            Ok(Response::Ok) => {
-                                self.state_transition(GameState::WaitForReply);
-                            }
+                            Ok(Response::Ok) => { /* noop */ }
                             response => {
                                 panic!("Unexpected respone to SEND-MESSAGE: {:?}", response)
                             }
@@ -235,6 +197,7 @@ impl Game {
 
 #[derive(Debug)]
 enum Event {
+    GameIsActive,
     TurnIsActive(bool),
     MakeGuess(Coord),
     GotGuess(Coord),
@@ -244,11 +207,13 @@ enum Event {
 #[derive(Debug)]
 enum Command {
     Start,
+    WaitForGameOn,
     WaitForTurn(bool),
 }
 
 enum BackgroundState {
     Idle,
+    WaitForGameOn,
     WaitForTurn(bool),
 }
 
@@ -301,13 +266,10 @@ async fn background_thread(
             match cmd {
                 Command::Start => match client.start_session().await {
                     Ok(Response::Ok) => info!("Session start requested"),
-                    response => {
-                        panic!("Unexpected response for session start: {:?}", response)
-                    }
+                    response => panic!("Unexpected response for session start: {:?}", response),
                 },
-                Command::WaitForTurn(is_self) => {
-                    state = BackgroundState::WaitForTurn(is_self);
-                }
+                Command::WaitForTurn(is_self) => state = BackgroundState::WaitForTurn(is_self),
+                Command::WaitForGameOn => state = BackgroundState::WaitForGameOn,
             }
         }
 
@@ -327,9 +289,20 @@ async fn background_thread(
                     }
                     _ => panic!("Unexpected response to IS-GAMER-TURN: {:?}", response),
                 },
-                Err(_) => {
-                    panic!("Error while checking turn");
-                }
+                Err(_) => panic!("Error while checking turn"),
+            },
+            BackgroundState::WaitForGameOn => match client.is_game_on().await {
+                Ok(response) => match response {
+                    minignetcommon::Response::OkWithBool(is_game_on) => {
+                        info!("IS-GAME-ON response: {}", is_game_on);
+                        if is_game_on {
+                            state = BackgroundState::WaitForTurn(true);
+                            event_queue.lock().await.push_front(Event::GameIsActive);
+                        }
+                    }
+                    _ => panic!("Unexpected response to IS-GAME-ON: {:?}", response),
+                },
+                Err(_) => panic!("Error while checking turn"),
             },
         }
 
