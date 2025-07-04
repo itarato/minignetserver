@@ -30,6 +30,7 @@ enum CellState {
     Miss,
 }
 
+#[derive(Debug)]
 enum GameState {
     Initialize,
     ReadyToGuess,
@@ -112,16 +113,20 @@ impl Game {
             .push_front(Command::WaitForTurn(true));
     }
 
+    fn state_transition(&mut self, to: GameState) {
+        info!("State change from {:?} to {:?}", self.state, to);
+        self.state = to;
+    }
+
     async fn run(&mut self) {
         loop {
-            self.execute_input_command_if_any().await;
             self.consume_events().await;
 
             match self.state {
                 GameState::Initialize => match self.client.is_game_on().await {
                     Ok(Response::OkWithBool(is_game_on)) => {
                         if is_game_on {
-                            self.state = GameState::OtherTurn;
+                            self.state_transition(GameState::OtherTurn);
                         }
                     }
                     response => {
@@ -130,47 +135,82 @@ impl Game {
                 },
                 GameState::ReadyToGuess => {}
                 GameState::WaitForReply => {}
-                GameState::OtherTurn => match self.client.is_gamer_turn().await {
-                    Ok(Response::OkWithBool(is_gamer_turn)) => {
-                        if is_gamer_turn {
-                            self.state = GameState::ReadyToGuess;
-                        }
-                    }
-                    response => {
-                        panic!("Unexpected response for IS_GAMER_TURN: {:?}", response)
-                    }
-                },
+                GameState::OtherTurn => {
+                    //     match self.client.is_gamer_turn().await {
+                    //     Ok(Response::OkWithBool(is_gamer_turn)) => {
+                    //         if is_gamer_turn {
+                    //             self.state_transition(GameState::ReadyToGuess);
+                    //         }
+                    //     }
+                    //     response => {
+                    //         panic!("Unexpected response for IS_GAMER_TURN: {:?}", response)
+                    //     }
+                    // };
+                }
             }
 
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
-    async fn read_stdin_line() -> Option<String> {
-        let mut stdin = BufReader::new(io::stdin()).lines();
+    async fn consume_events(&mut self) {
+        loop {
+            let event_popped = self.event_queue.lock().await.pop_back();
 
-        match stdin.next_line().await {
-            Ok(line) => line,
-            _ => None,
-        }
-    }
+            if let Some(event) = event_popped {
+                info!("Got event: {:?}", &event);
 
-    async fn execute_input_command_if_any(&mut self) {
-        info!("CHECK INPUT");
-        if let Some(stdin_line) = Game::read_stdin_line().await {
-            info!("Got raw input: {}", stdin_line);
-
-            match InputParser::parse(stdin_line) {
-                Ok(cmd) => match cmd {
-                    InputCommand::Start => self.cmd_queue.lock().await.push_front(Command::Start),
-                    InputCommand::Step(coord_guess) => {
+                match event {
+                    Event::TurnIsActive(is_self) => {
+                        if is_self {
+                            self.state_transition(GameState::ReadyToGuess);
+                        } else {
+                            self.state_transition(GameState::OtherTurn);
+                        }
+                    }
+                    Event::GotGuess(coord) => {
+                        let is_hit = coord.x == 1 && coord.y == 1;
                         match self
                             .client
                             .send_message(Message {
                                 from: self.client.gamer_id.clone(),
                                 to: MessageAddress::All,
                                 payload: bincode::encode_to_vec(
-                                    TorpedoMessage::Guess(coord_guess),
+                                    TorpedoMessage::HitOrMissReply(coord, is_hit),
+                                    bincode::config::standard(),
+                                )
+                                .expect("Failed encoding hit of miss reply message"),
+                            })
+                            .await
+                        {
+                            Ok(Response::Ok) => { /* noop */ }
+                            response => {
+                                panic!("Unexpected response to send message: {:?}", response);
+                            }
+                        }
+                    }
+                    Event::GotReplyToGuess(guess, is_hit) => {
+                        // TODO - save it
+                        match self.client.next_gamer().await {
+                            Ok(Response::Ok) => {
+                                self.cmd_queue
+                                    .lock()
+                                    .await
+                                    .push_front(Command::WaitForTurn(false));
+                            }
+                            response => {
+                                panic!("Unexpected response to NEXT-GAMER: {:?}", response);
+                            }
+                        }
+                    }
+                    Event::MakeGuess(coord) => {
+                        match self
+                            .client
+                            .send_message(Message {
+                                from: self.client.gamer_id.clone(),
+                                to: MessageAddress::All,
+                                payload: bincode::encode_to_vec(
+                                    TorpedoMessage::Guess(coord),
                                     bincode::config::standard(),
                                 )
                                 .expect("Failed encoding guess"),
@@ -178,68 +218,16 @@ impl Game {
                             .await
                         {
                             Ok(Response::Ok) => {
-                                self.state = GameState::WaitForReply;
+                                self.state_transition(GameState::WaitForReply);
                             }
-                            response => panic!("Unexpected respone to update send: {:?}", response),
-                        }
-                    }
-                },
-                Err(err) => {
-                    error!("Cannot parse command: {:?}", err);
-                }
-            }
-        }
-    }
-
-    async fn consume_events(&mut self) {
-        info!("CHECK EVENTS");
-        let mut _event_queue = self.event_queue.lock().await;
-        while let Some(event) = _event_queue.pop_back() {
-            info!("Got event: {:?}", &event);
-
-            match event {
-                Event::TurnIsActive(is_self) => {
-                    if is_self {
-                        self.state = GameState::ReadyToGuess;
-                    } else {
-                        self.state = GameState::OtherTurn;
-                    }
-                }
-                Event::GotGuess(coord) => {
-                    let is_hit = coord.x == 1 && coord.y == 1;
-                    match self
-                        .client
-                        .send_message(Message {
-                            from: self.client.gamer_id.clone(),
-                            to: MessageAddress::All,
-                            payload: bincode::encode_to_vec(
-                                TorpedoMessage::HitOrMissReply(coord, is_hit),
-                                bincode::config::standard(),
-                            )
-                            .expect("Failed encoding hit of miss reply message"),
-                        })
-                        .await
-                    {
-                        Ok(Response::Ok) => { /* noop */ }
-                        response => {
-                            panic!("Unexpected response to send message: {:?}", response);
+                            response => {
+                                panic!("Unexpected respone to SEND-MESSAGE: {:?}", response)
+                            }
                         }
                     }
                 }
-                Event::GotReplyToGuess(guess, is_hit) => {
-                    // TODO - save it
-                    match self.client.next_gamer().await {
-                        Ok(Response::Ok) => {
-                            self.cmd_queue
-                                .lock()
-                                .await
-                                .push_front(Command::WaitForTurn(false));
-                        }
-                        response => {
-                            panic!("Unexpected response to NEXT-GAMER: {:?}", response);
-                        }
-                    }
-                }
+            } else {
+                break;
             }
         }
     }
@@ -248,6 +236,7 @@ impl Game {
 #[derive(Debug)]
 enum Event {
     TurnIsActive(bool),
+    MakeGuess(Coord),
     GotGuess(Coord),
     GotReplyToGuess(Coord, bool),
 }
@@ -348,6 +337,31 @@ async fn background_thread(
     }
 }
 
+async fn stdin_readline_thread(
+    cmd_queue: Arc<Mutex<VecDeque<Command>>>,
+    event_queue: Arc<Mutex<VecDeque<Event>>>,
+) {
+    loop {
+        let mut stdin = BufReader::new(io::stdin()).lines();
+
+        match stdin.next_line().await {
+            Ok(Some(line)) => match InputParser::parse(line) {
+                Ok(cmd) => match cmd {
+                    InputCommand::Start => cmd_queue.lock().await.push_front(Command::Start),
+                    InputCommand::Step(coord_guess) => event_queue
+                        .lock()
+                        .await
+                        .push_front(Event::MakeGuess(coord_guess)),
+                },
+                Err(err) => {
+                    error!("Cannot parse command: {:?}", err);
+                }
+            },
+            error => warn!("Unexpected result at line reading: {:?}", error),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
@@ -365,11 +379,17 @@ async fn main() {
     let client = MGNClient::new(cmd_line_args.server, session_id, gamer_id).unwrap();
     let client_clone = client.clone();
 
-    let mut game = Game::new(client, event_queue, cmd_queue);
+    let mut game = Game::new(client, event_queue.clone(), cmd_queue.clone());
     game.init().await;
 
     tokio::spawn(async move {
         background_thread(client_clone, event_queue_clone, cmd_queue_clone).await;
+    });
+
+    let cmd_queue_clone = cmd_queue.clone();
+    let event_queue_clone = event_queue.clone();
+    tokio::spawn(async move {
+        stdin_readline_thread(cmd_queue_clone, event_queue_clone).await;
     });
 
     game.run().await;
