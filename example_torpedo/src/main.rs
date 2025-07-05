@@ -202,8 +202,6 @@ impl Game {
                             continue;
                         }
 
-                        self.state = GameState::OtherTurn;
-
                         match self.client.start_session().await {
                             Ok(Response::Ok) => info!("Session start requested"),
                             response => {
@@ -212,6 +210,8 @@ impl Game {
                         };
                     }
                     Event::GameIsActive => {
+                        self.state = GameState::OtherTurn;
+
                         self.cmd_queue
                             .lock()
                             .await
