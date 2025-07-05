@@ -47,6 +47,28 @@ enum InputCommand {
     Step(Coord),
 }
 
+#[derive(Debug)]
+enum Event {
+    StartRequest,
+    GameIsActive,
+    TurnIsActive(bool),
+    MakeGuess(Coord),
+    GotGuess(Coord),
+    GotReplyToGuess(Coord, bool),
+}
+
+#[derive(Debug)]
+enum Command {
+    WaitForGameOn,
+    WaitForTurn(bool),
+}
+
+enum BackgroundState {
+    Idle,
+    WaitForGameOn,
+    WaitForTurn(bool),
+}
+
 struct InputParser;
 
 impl InputParser {
@@ -118,6 +140,10 @@ impl Game {
                 info!("Got event: {:?}", &event);
 
                 match event {
+                    Event::StartRequest => match self.client.start_session().await {
+                        Ok(Response::Ok) => info!("Session start requested"),
+                        response => panic!("Unexpected response for session start: {:?}", response),
+                    },
                     Event::GameIsActive => {
                         self.cmd_queue
                             .lock()
@@ -195,28 +221,6 @@ impl Game {
     }
 }
 
-#[derive(Debug)]
-enum Event {
-    GameIsActive,
-    TurnIsActive(bool),
-    MakeGuess(Coord),
-    GotGuess(Coord),
-    GotReplyToGuess(Coord, bool),
-}
-
-#[derive(Debug)]
-enum Command {
-    Start,
-    WaitForGameOn,
-    WaitForTurn(bool),
-}
-
-enum BackgroundState {
-    Idle,
-    WaitForGameOn,
-    WaitForTurn(bool),
-}
-
 async fn read_all_messages(client: &MGNClient) -> Vec<Message> {
     match client.fetch_all_messages().await {
         Ok(Response::OkWithMessages(messages)) => messages,
@@ -264,10 +268,6 @@ async fn background_thread(
             info!("Got command: {:?}", &cmd);
 
             match cmd {
-                Command::Start => match client.start_session().await {
-                    Ok(Response::Ok) => info!("Session start requested"),
-                    response => panic!("Unexpected response for session start: {:?}", response),
-                },
                 Command::WaitForTurn(is_self) => state = BackgroundState::WaitForTurn(is_self),
                 Command::WaitForGameOn => state = BackgroundState::WaitForGameOn,
             }
@@ -296,7 +296,6 @@ async fn background_thread(
                     minignetcommon::Response::OkWithBool(is_game_on) => {
                         info!("IS-GAME-ON response: {}", is_game_on);
                         if is_game_on {
-                            state = BackgroundState::WaitForTurn(true);
                             event_queue.lock().await.push_front(Event::GameIsActive);
                         }
                     }
@@ -310,17 +309,14 @@ async fn background_thread(
     }
 }
 
-async fn stdin_readline_thread(
-    cmd_queue: Arc<Mutex<VecDeque<Command>>>,
-    event_queue: Arc<Mutex<VecDeque<Event>>>,
-) {
+async fn stdin_readline_thread(event_queue: Arc<Mutex<VecDeque<Event>>>) {
     loop {
         let mut stdin = BufReader::new(io::stdin()).lines();
 
         match stdin.next_line().await {
             Ok(Some(line)) => match InputParser::parse(line) {
                 Ok(cmd) => match cmd {
-                    InputCommand::Start => cmd_queue.lock().await.push_front(Command::Start),
+                    InputCommand::Start => event_queue.lock().await.push_front(Event::StartRequest),
                     InputCommand::Step(coord_guess) => event_queue
                         .lock()
                         .await
@@ -359,10 +355,9 @@ async fn main() {
         background_thread(client_clone, event_queue_clone, cmd_queue_clone).await;
     });
 
-    let cmd_queue_clone = cmd_queue.clone();
     let event_queue_clone = event_queue.clone();
     tokio::spawn(async move {
-        stdin_readline_thread(cmd_queue_clone, event_queue_clone).await;
+        stdin_readline_thread(event_queue_clone).await;
     });
 
     game.run().await;
