@@ -3,13 +3,18 @@ extern crate pretty_env_logger;
 
 use bincode::{Decode, Encode};
 use log::{error, info, warn};
+use std::io::Write;
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use clap::Parser;
 use minignetclient::MGNClient;
 use minignetcommon::{Error, GamerIdType, Message, MessageAddress, Response, SessionIdType};
+use rand::{prelude::*, rng};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
+
+const SHIP_SIZES: [u8; 5] = [5, 4, 3, 3, 2];
+const DIR_MAP: [[u8; 2]; 2] = [[1, 0], [0, 1]];
 
 #[derive(Parser, Debug)]
 struct CmdLineArgs {
@@ -30,10 +35,16 @@ enum CellState {
     Miss,
 }
 
-#[derive(Debug, Decode, Encode)]
+#[derive(Debug, Decode, Encode, PartialEq)]
 struct Coord {
     x: u8,
     y: u8,
+}
+
+impl Coord {
+    fn singular(&self) -> usize {
+        (self.y * 10 + self.x) as usize
+    }
 }
 
 #[derive(Debug, Decode, Encode)]
@@ -69,6 +80,13 @@ enum BackgroundState {
     WaitForTurn(bool),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+enum GameState {
+    Init,
+    SelfTurn,
+    OtherTurn,
+}
+
 struct InputParser;
 
 impl InputParser {
@@ -81,9 +99,9 @@ impl InputParser {
             .unwrap()
             .captures(&raw)
         {
-            let col = caps.get(1).unwrap().as_str().chars().next().unwrap() as u8 - b'a';
-            let row: u8 = caps.get(2).unwrap().as_str().parse().unwrap();
-            return Ok(InputCommand::Step(Coord { x: col, y: row }));
+            let y = caps.get(1).unwrap().as_str().chars().next().unwrap() as u8 - b'a';
+            let x: u8 = caps.get(2).unwrap().as_str().parse().unwrap();
+            return Ok(InputCommand::Step(Coord { x: x - 1, y: y }));
         }
 
         Err(format!("Unparsable command: {:?}", raw).into())
@@ -93,9 +111,11 @@ impl InputParser {
 struct Game {
     self_board: [CellState; 100],
     other_board: [CellState; 100],
+    ship_coords: Vec<Coord>,
     client: MGNClient,
     event_queue: Arc<Mutex<VecDeque<Event>>>,
     cmd_queue: Arc<Mutex<VecDeque<Command>>>,
+    state: GameState,
 }
 
 impl Game {
@@ -104,12 +124,46 @@ impl Game {
         event_queue: Arc<Mutex<VecDeque<Event>>>,
         cmd_queue: Arc<Mutex<VecDeque<Command>>>,
     ) -> Self {
+        let mut ship_coords = vec![];
+        for ship_size in SHIP_SIZES {
+            loop {
+                let startx: u8 = rng().random_range(1..=10);
+                let starty: u8 = rng().random_range(1..=10);
+                let dir: usize = rng().random_range(0..=1);
+
+                let mut is_fit = true;
+                let mut new_ship_coords = vec![];
+                for i in 0..ship_size {
+                    let x = startx + DIR_MAP[dir][0] * i;
+                    let y = starty + DIR_MAP[dir][1] * i;
+                    let coord = Coord { x, y };
+
+                    if ship_coords.contains(&coord) || x >= 10 || y >= 10 {
+                        is_fit = false;
+                        break;
+                    }
+
+                    new_ship_coords.push(coord);
+                }
+
+                if !is_fit {
+                    continue;
+                }
+
+                info!("Ship at: x={} y={} d={}", startx, starty, dir);
+                ship_coords.append(&mut new_ship_coords);
+                break;
+            }
+        }
+
         Self {
             self_board: [CellState::Undiscovered; 100],
             other_board: [CellState::Undiscovered; 100],
+            ship_coords,
             client,
             event_queue,
             cmd_queue,
+            state: GameState::Init,
         }
     }
 
@@ -126,6 +180,8 @@ impl Game {
     }
 
     async fn run(&mut self) {
+        self.refresh_screen();
+
         loop {
             self.consume_events().await;
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -140,10 +196,21 @@ impl Game {
                 info!("Got event: {:?}", &event);
 
                 match event {
-                    Event::StartRequest => match self.client.start_session().await {
-                        Ok(Response::Ok) => info!("Session start requested"),
-                        response => panic!("Unexpected response for session start: {:?}", response),
-                    },
+                    Event::StartRequest => {
+                        if self.state != GameState::Init {
+                            warn!("Cannot start game, already started.");
+                            continue;
+                        }
+
+                        self.state = GameState::OtherTurn;
+
+                        match self.client.start_session().await {
+                            Ok(Response::Ok) => info!("Session start requested"),
+                            response => {
+                                panic!("Unexpected response for session start: {:?}", response)
+                            }
+                        };
+                    }
                     Event::GameIsActive => {
                         self.cmd_queue
                             .lock()
@@ -152,14 +219,24 @@ impl Game {
                     }
                     Event::TurnIsActive(is_self) => {
                         if !is_self {
+                            self.state = GameState::OtherTurn;
                             self.cmd_queue
                                 .lock()
                                 .await
                                 .push_front(Command::WaitForTurn(true));
+                        } else {
+                            self.state = GameState::SelfTurn;
                         }
                     }
                     Event::GotGuess(coord) => {
-                        let is_hit = coord.x == 1 && coord.y == 1;
+                        let is_hit = self.ship_coords.contains(&coord);
+
+                        self.self_board[coord.singular()] = if is_hit {
+                            CellState::Hit
+                        } else {
+                            CellState::Miss
+                        };
+
                         match self
                             .client
                             .send_message(Message {
@@ -180,7 +257,12 @@ impl Game {
                         }
                     }
                     Event::GotReplyToGuess(guess, is_hit) => {
-                        // TODO - save it
+                        self.other_board[guess.singular()] = if is_hit {
+                            CellState::Hit
+                        } else {
+                            CellState::Miss
+                        };
+
                         match self.client.next_gamer().await {
                             Ok(Response::Ok) => {
                                 self.cmd_queue
@@ -194,6 +276,11 @@ impl Game {
                         }
                     }
                     Event::MakeGuess(coord) => {
+                        if self.state != GameState::SelfTurn {
+                            warn!("Cannot guess while not on turn");
+                            continue;
+                        }
+
                         match self
                             .client
                             .send_message(Message {
@@ -214,10 +301,70 @@ impl Game {
                         }
                     }
                 }
+
+                self.refresh_screen();
             } else {
                 break;
             }
         }
+    }
+
+    fn refresh_screen(&self) {
+        print!("\x1B[2J\x1B[1;1H");
+
+        println!(
+            "\x1B[93m\x1B[1m   SELF                                              OTHER\x1B[0m"
+        );
+        println!(
+            "\x1B[93m   1   2   3   4   5   6   7   8   9   10            1   2   3   4   5   6   7   8   9   10\x1B[0m"
+        );
+
+        for y in 0..10 {
+            print!("\x1B[93m{}\x1B[0m ", (b'A' + (y as u8)) as char);
+
+            for x in 0..10 {
+                if self.ship_coords.contains(&Coord { x, y }) {
+                    print!("\x1B[38;5;208m[\x1B[0m");
+                } else {
+                    print!("\x1B[90m[\x1B[0m");
+                }
+
+                match self.self_board[(y * 10 + x) as usize] {
+                    CellState::Undiscovered => print!(" "),
+                    CellState::Hit => print!("\x1B[91m█\x1B[0m"),
+                    CellState::Miss => print!("\x1B[97m░\x1B[0m"),
+                }
+
+                if self.ship_coords.contains(&Coord { x, y }) {
+                    print!("\x1B[38;5;208m] \x1B[0m");
+                } else {
+                    print!("\x1B[90m] \x1B[0m");
+                }
+            }
+
+            print!("        ");
+
+            print!("\x1B[93m{}\x1B[0m ", (b'A' + (y as u8)) as char);
+            for x in 0..10 {
+                print!("\x1B[90m[\x1B[0m");
+                match self.other_board[(y * 10 + x) as usize] {
+                    CellState::Undiscovered => print!(" "),
+                    CellState::Hit => print!("\x1B[91m█\x1B[0m"),
+                    CellState::Miss => print!("\x1B[97m░\x1B[0m"),
+                }
+                print!("\x1B[90m] \x1B[0m");
+            }
+
+            print!("\n\n");
+        }
+
+        match self.state {
+            GameState::Init => print!("Type 'start' to start > "),
+            GameState::SelfTurn => print!("Guess > "),
+            GameState::OtherTurn => print!("... wait for the other player ..."),
+        }
+
+        std::io::stdout().flush().unwrap();
     }
 }
 
