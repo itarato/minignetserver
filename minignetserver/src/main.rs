@@ -3,7 +3,7 @@ extern crate pretty_env_logger;
 
 use std::{collections::HashMap, sync::Arc};
 
-use log::{error, info};
+use log::{error, info, trace};
 use minignetcommon::{GamerIdType, Message, MessageAddress, Operation, Response, SessionIdType};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -200,12 +200,12 @@ impl MGNServer {
             match reader.read(&mut buf).await {
                 Ok(size) => {
                     if size == 0 {
-                        info!("Connection closed");
+                        trace!("Connection closed");
                         break;
                     }
 
                     bytes.extend_from_slice(&buf[0..size]);
-                    info!("Received {} bytes", size);
+                    trace!("Received {} bytes", size);
                 }
                 Err(err) => {
                     error!("Error while reading: {:?}", err);
