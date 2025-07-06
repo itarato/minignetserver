@@ -182,7 +182,7 @@ impl MGNServer {
 
     pub(crate) async fn run(&self) {
         let world_state: Arc<Mutex<WorldState>> = Arc::new(Mutex::new(WorldState::default()));
-        let listener = TcpListener::bind("127.0.0.1:8888").await.unwrap();
+        let listener = TcpListener::bind("0.0.0.0:8888").await.unwrap();
 
         loop {
             let (socket, _) = listener.accept().await.unwrap();

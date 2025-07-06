@@ -61,7 +61,7 @@ impl MGNClient {
                 return Ok(decoded);
             }
             Err(e) => {
-                eprintln!("Failed to connect: {}", e);
+                eprintln!("Failed to connect: {} to: {:?}", e, self.addr);
                 return Err(e.into());
             }
         }
