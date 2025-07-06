@@ -65,8 +65,6 @@ enum Event {
     GameIsActive,
     TurnIsActive(bool),
     MakeGuess(Coord),
-    GotGuess(Coord),
-    GotReplyToGuess(Coord, bool),
 }
 
 #[derive(Debug)]
@@ -115,16 +113,12 @@ struct Game {
     ship_coords: Vec<Coord>,
     client: MGNClient,
     event_reader: Receiver<Event>,
-    cmd_queue: Arc<Mutex<VecDeque<Command>>>,
+    cmd_writer: Sender<Command>,
     state: GameState,
 }
 
 impl Game {
-    fn new(
-        client: MGNClient,
-        event_reader: Receiver<Event>,
-        cmd_queue: Arc<Mutex<VecDeque<Command>>>,
-    ) -> Self {
+    fn new(client: MGNClient, event_reader: Receiver<Event>, cmd_writer: Sender<Command>) -> Self {
         let mut ship_coords = vec![];
         for ship_size in SHIP_SIZES {
             loop {
@@ -163,7 +157,7 @@ impl Game {
             ship_coords,
             client,
             event_reader,
-            cmd_queue,
+            cmd_writer,
             state: GameState::Init,
         }
     }
@@ -174,17 +168,22 @@ impl Game {
             response => panic!("Unexpected response for join: {:?}", response),
         }
 
-        self.cmd_queue
-            .lock()
+        self.cmd_writer
+            .send(Command::WaitForGameOn)
             .await
-            .push_front(Command::WaitForGameOn);
+            .expect("Failed sending command");
     }
 
     async fn run(&mut self) {
         self.refresh_screen();
 
         loop {
-            self.consume_events().await;
+            tokio::select! {
+                _ = self.consume_events() => {}
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                    self.consume_messages().await;
+                }
+            };
         }
     }
 
@@ -210,67 +209,20 @@ impl Game {
                     Event::GameIsActive => {
                         self.state = GameState::OtherTurn;
 
-                        self.cmd_queue
-                            .lock()
+                        self.cmd_writer
+                            .send(Command::WaitForTurn(true))
                             .await
-                            .push_front(Command::WaitForTurn(true));
+                            .expect("Failed sending command");
                     }
                     Event::TurnIsActive(is_self) => {
                         if !is_self {
                             self.state = GameState::OtherTurn;
-                            self.cmd_queue
-                                .lock()
+                            self.cmd_writer
+                                .send(Command::WaitForTurn(true))
                                 .await
-                                .push_front(Command::WaitForTurn(true));
+                                .expect("Failed sending command");
                         } else {
                             self.state = GameState::SelfTurn;
-                        }
-                    }
-                    Event::GotGuess(coord) => {
-                        let is_hit = self.ship_coords.contains(&coord);
-
-                        self.self_board[coord.singular()] = if is_hit {
-                            CellState::Hit
-                        } else {
-                            CellState::Miss
-                        };
-
-                        match self
-                            .client
-                            .send_message(Message {
-                                from: self.client.gamer_id.clone(),
-                                to: MessageAddress::All,
-                                payload: bincode::encode_to_vec(
-                                    TorpedoMessage::HitOrMissReply(coord, is_hit),
-                                    bincode::config::standard(),
-                                )
-                                .expect("Failed encoding hit of miss reply message"),
-                            })
-                            .await
-                        {
-                            Ok(Response::Ok) => { /* noop */ }
-                            response => {
-                                panic!("Unexpected response to send message: {:?}", response);
-                            }
-                        }
-                    }
-                    Event::GotReplyToGuess(guess, is_hit) => {
-                        self.other_board[guess.singular()] = if is_hit {
-                            CellState::Hit
-                        } else {
-                            CellState::Miss
-                        };
-
-                        match self.client.next_gamer().await {
-                            Ok(Response::Ok) => {
-                                self.cmd_queue
-                                    .lock()
-                                    .await
-                                    .push_front(Command::WaitForTurn(false));
-                            }
-                            response => {
-                                panic!("Unexpected response to NEXT-GAMER: {:?}", response);
-                            }
                         }
                     }
                     Event::MakeGuess(coord) => {
@@ -304,6 +256,76 @@ impl Game {
             }
             None => {
                 error!("No event");
+            }
+        }
+    }
+
+    async fn consume_messages(&mut self) {
+        match self.client.fetch_all_messages().await {
+            Ok(Response::OkWithMessages(messages)) => {
+                for message in messages {
+                    let (torpedo_message, _size): (TorpedoMessage, _) =
+                        bincode::decode_from_slice(&message.payload, bincode::config::standard())
+                            .expect("Failed decoding message payload");
+
+                    info!("Got message: {:?}", &torpedo_message);
+
+                    match torpedo_message {
+                        TorpedoMessage::Guess(coord) => {
+                            let is_hit = self.ship_coords.contains(&coord);
+
+                            self.self_board[coord.singular()] = if is_hit {
+                                CellState::Hit
+                            } else {
+                                CellState::Miss
+                            };
+
+                            match self
+                                .client
+                                .send_message(Message {
+                                    from: self.client.gamer_id.clone(),
+                                    to: MessageAddress::All,
+                                    payload: bincode::encode_to_vec(
+                                        TorpedoMessage::HitOrMissReply(coord, is_hit),
+                                        bincode::config::standard(),
+                                    )
+                                    .expect("Failed encoding hit of miss reply message"),
+                                })
+                                .await
+                            {
+                                Ok(Response::Ok) => { /* noop */ }
+                                response => {
+                                    panic!("Unexpected response to send message: {:?}", response);
+                                }
+                            }
+                        }
+                        TorpedoMessage::HitOrMissReply(coord, is_hit) => {
+                            self.other_board[coord.singular()] = if is_hit {
+                                CellState::Hit
+                            } else {
+                                CellState::Miss
+                            };
+
+                            match self.client.next_gamer().await {
+                                Ok(Response::Ok) => {
+                                    self.cmd_writer
+                                        .send(Command::WaitForTurn(false))
+                                        .await
+                                        .expect("Failed sending command");
+                                }
+                                response => {
+                                    panic!("Unexpected response to NEXT-GAMER: {:?}", response);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            response => {
+                error!(
+                    "Unexpected response {:?} for fetching all messages",
+                    response
+                );
             }
         }
     }
@@ -367,97 +389,61 @@ impl Game {
     }
 }
 
-async fn read_all_messages(client: &MGNClient) -> Vec<Message> {
-    match client.fetch_all_messages().await {
-        Ok(Response::OkWithMessages(messages)) => messages,
-        response => {
-            error!(
-                "Unexpected response {:?} for fetching all messages",
-                response
-            );
-            vec![]
-        }
-    }
-}
-
 async fn background_thread(
     client: MGNClient,
     event_writer: Sender<Event>,
-    cmd_queue: Arc<Mutex<VecDeque<Command>>>,
+    mut cmd_reader: Receiver<Command>,
 ) {
     info!("Background thread has started");
     let mut state = BackgroundState::Idle;
 
     loop {
-        for message in read_all_messages(&client).await {
-            let (torpedo_message, _size): (TorpedoMessage, _) =
-                bincode::decode_from_slice(&message.payload, bincode::config::standard())
-                    .expect("Failed decoding message payload");
+        tokio::select! {
+            Some(cmd) = cmd_reader.recv() => {
+                info!("Got command: {:?}", &cmd);
 
-            info!("Got message: {:?}", &torpedo_message);
-
-            match torpedo_message {
-                TorpedoMessage::Guess(coord) => {
-                    event_writer
-                        .send(Event::GotGuess(coord))
-                        .await
-                        .expect("Failed sending event");
+                match cmd {
+                    Command::WaitForTurn(is_self) => state = BackgroundState::WaitForTurn(is_self),
+                    Command::WaitForGameOn => state = BackgroundState::WaitForGameOn,
                 }
-                TorpedoMessage::HitOrMissReply(coord, is_hit) => {
-                    event_writer
-                        .send(Event::GotReplyToGuess(coord, is_hit))
-                        .await
-                        .expect("Failed sending event");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                match state {
+                    BackgroundState::Idle => {}
+                    BackgroundState::WaitForTurn(expectation) => match client.is_gamer_turn().await {
+                        Ok(response) => match response {
+                            minignetcommon::Response::OkWithBool(is_my_turn) => {
+                                info!("IS-MY-TURN response: {}", is_my_turn);
+                                if is_my_turn == expectation {
+                                    state = BackgroundState::Idle;
+                                    event_writer
+                                        .send(Event::TurnIsActive(is_my_turn))
+                                        .await
+                                        .expect("Failed sending event");
+                                }
+                            }
+                            _ => panic!("Unexpected response to IS-GAMER-TURN: {:?}", response),
+                        },
+                        Err(_) => panic!("Error while checking turn"),
+                    },
+                    BackgroundState::WaitForGameOn => match client.is_game_on().await {
+                        Ok(response) => match response {
+                            minignetcommon::Response::OkWithBool(is_game_on) => {
+                                info!("IS-GAME-ON response: {}", is_game_on);
+                                if is_game_on {
+                                    event_writer
+                                        .send(Event::GameIsActive)
+                                        .await
+                                        .expect("Failed sending event");
+                                }
+                            }
+                            _ => panic!("Unexpected response to IS-GAME-ON: {:?}", response),
+                        },
+                        Err(_) => panic!("Error while checking turn"),
+                    },
                 }
             }
         }
-
-        let mut _cmd_queue = cmd_queue.lock().await;
-        while let Some(cmd) = _cmd_queue.pop_back() {
-            info!("Got command: {:?}", &cmd);
-
-            match cmd {
-                Command::WaitForTurn(is_self) => state = BackgroundState::WaitForTurn(is_self),
-                Command::WaitForGameOn => state = BackgroundState::WaitForGameOn,
-            }
-        }
-
-        match state {
-            BackgroundState::Idle => {}
-            BackgroundState::WaitForTurn(expectation) => match client.is_gamer_turn().await {
-                Ok(response) => match response {
-                    minignetcommon::Response::OkWithBool(is_my_turn) => {
-                        info!("IS-MY-TURN response: {}", is_my_turn);
-                        if is_my_turn == expectation {
-                            state = BackgroundState::Idle;
-                            event_writer
-                                .send(Event::TurnIsActive(is_my_turn))
-                                .await
-                                .expect("Failed sending event");
-                        }
-                    }
-                    _ => panic!("Unexpected response to IS-GAMER-TURN: {:?}", response),
-                },
-                Err(_) => panic!("Error while checking turn"),
-            },
-            BackgroundState::WaitForGameOn => match client.is_game_on().await {
-                Ok(response) => match response {
-                    minignetcommon::Response::OkWithBool(is_game_on) => {
-                        info!("IS-GAME-ON response: {}", is_game_on);
-                        if is_game_on {
-                            event_writer
-                                .send(Event::GameIsActive)
-                                .await
-                                .expect("Failed sending event");
-                        }
-                    }
-                    _ => panic!("Unexpected response to IS-GAME-ON: {:?}", response),
-                },
-                Err(_) => panic!("Error while checking turn"),
-            },
-        }
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -496,23 +482,19 @@ async fn main() {
     info!("Torpedo starts");
 
     let (event_writer, event_reader) = tokio::sync::mpsc::channel::<Event>(16);
-
+    let (cmd_writer, cmd_reader) = tokio::sync::mpsc::channel::<Command>(16);
     let cmd_line_args = CmdLineArgs::parse();
-    let cmd_queue: Arc<Mutex<VecDeque<Command>>> = Arc::new(Mutex::new(VecDeque::new()));
-
     let session_id = cmd_line_args.session_id.clone();
     let gamer_id = cmd_line_args.gamer_id.clone();
-
-    let cmd_queue_clone = cmd_queue.clone();
     let client = MGNClient::new(cmd_line_args.server, session_id, gamer_id).unwrap();
     let client_clone = client.clone();
 
-    let mut game = Game::new(client, event_reader, cmd_queue.clone());
+    let mut game = Game::new(client, event_reader, cmd_writer.clone());
     game.init().await;
 
     let event_writer_clone = event_writer.clone();
     tokio::spawn(async move {
-        background_thread(client_clone, event_writer_clone, cmd_queue_clone).await;
+        background_thread(client_clone, event_writer_clone, cmd_reader).await;
     });
 
     let event_writer_clone = event_writer.clone();
