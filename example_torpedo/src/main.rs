@@ -4,7 +4,7 @@ extern crate pretty_env_logger;
 use bincode::{Decode, Encode};
 use log::{error, info, warn};
 use std::io::Write;
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::time::Duration;
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use clap::Parser;
@@ -12,7 +12,6 @@ use minignetclient::MGNClient;
 use minignetcommon::{Error, GamerIdType, Message, MessageAddress, Response, SessionIdType};
 use rand::{prelude::*, rng};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
-use tokio::sync::Mutex;
 
 const SHIP_SIZES: [u8; 5] = [5, 4, 3, 3, 2];
 const DIR_MAP: [[u8; 2]; 2] = [[1, 0], [0, 1]];
