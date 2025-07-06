@@ -5,6 +5,7 @@ use bincode::{Decode, Encode};
 use log::{error, info, warn};
 use std::io::Write;
 use std::{collections::VecDeque, sync::Arc, time::Duration};
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use clap::Parser;
 use minignetclient::MGNClient;
@@ -113,7 +114,7 @@ struct Game {
     other_board: [CellState; 100],
     ship_coords: Vec<Coord>,
     client: MGNClient,
-    event_queue: Arc<Mutex<VecDeque<Event>>>,
+    event_reader: Receiver<Event>,
     cmd_queue: Arc<Mutex<VecDeque<Command>>>,
     state: GameState,
 }
@@ -121,7 +122,7 @@ struct Game {
 impl Game {
     fn new(
         client: MGNClient,
-        event_queue: Arc<Mutex<VecDeque<Event>>>,
+        event_reader: Receiver<Event>,
         cmd_queue: Arc<Mutex<VecDeque<Command>>>,
     ) -> Self {
         let mut ship_coords = vec![];
@@ -161,7 +162,7 @@ impl Game {
             other_board: [CellState::Undiscovered; 100],
             ship_coords,
             client,
-            event_queue,
+            event_reader,
             cmd_queue,
             state: GameState::Init,
         }
@@ -184,22 +185,19 @@ impl Game {
 
         loop {
             self.consume_events().await;
-            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
     async fn consume_events(&mut self) {
-        loop {
-            let event_popped = self.event_queue.lock().await.pop_back();
-
-            if let Some(event) = event_popped {
+        match self.event_reader.recv().await {
+            Some(event) => {
                 info!("Got event: {:?}", &event);
 
                 match event {
                     Event::StartRequest => {
                         if self.state != GameState::Init {
                             warn!("Cannot start game, already started.");
-                            continue;
+                            return;
                         }
 
                         match self.client.start_session().await {
@@ -278,7 +276,7 @@ impl Game {
                     Event::MakeGuess(coord) => {
                         if self.state != GameState::SelfTurn {
                             warn!("Cannot guess while not on turn");
-                            continue;
+                            return;
                         }
 
                         match self
@@ -303,8 +301,9 @@ impl Game {
                 }
 
                 self.refresh_screen();
-            } else {
-                break;
+            }
+            None => {
+                error!("No event");
             }
         }
     }
@@ -383,7 +382,7 @@ async fn read_all_messages(client: &MGNClient) -> Vec<Message> {
 
 async fn background_thread(
     client: MGNClient,
-    event_queue: Arc<Mutex<VecDeque<Event>>>,
+    event_writer: Sender<Event>,
     cmd_queue: Arc<Mutex<VecDeque<Command>>>,
 ) {
     info!("Background thread has started");
@@ -399,13 +398,16 @@ async fn background_thread(
 
             match torpedo_message {
                 TorpedoMessage::Guess(coord) => {
-                    event_queue.lock().await.push_front(Event::GotGuess(coord));
+                    event_writer
+                        .send(Event::GotGuess(coord))
+                        .await
+                        .expect("Failed sending event");
                 }
                 TorpedoMessage::HitOrMissReply(coord, is_hit) => {
-                    event_queue
-                        .lock()
+                    event_writer
+                        .send(Event::GotReplyToGuess(coord, is_hit))
                         .await
-                        .push_front(Event::GotReplyToGuess(coord, is_hit));
+                        .expect("Failed sending event");
                 }
             }
         }
@@ -428,10 +430,10 @@ async fn background_thread(
                         info!("IS-MY-TURN response: {}", is_my_turn);
                         if is_my_turn == expectation {
                             state = BackgroundState::Idle;
-                            event_queue
-                                .lock()
+                            event_writer
+                                .send(Event::TurnIsActive(is_my_turn))
                                 .await
-                                .push_front(Event::TurnIsActive(is_my_turn));
+                                .expect("Failed sending event");
                         }
                     }
                     _ => panic!("Unexpected response to IS-GAMER-TURN: {:?}", response),
@@ -443,7 +445,10 @@ async fn background_thread(
                     minignetcommon::Response::OkWithBool(is_game_on) => {
                         info!("IS-GAME-ON response: {}", is_game_on);
                         if is_game_on {
-                            event_queue.lock().await.push_front(Event::GameIsActive);
+                            event_writer
+                                .send(Event::GameIsActive)
+                                .await
+                                .expect("Failed sending event");
                         }
                     }
                     _ => panic!("Unexpected response to IS-GAME-ON: {:?}", response),
@@ -456,18 +461,25 @@ async fn background_thread(
     }
 }
 
-async fn stdin_readline_thread(event_queue: Arc<Mutex<VecDeque<Event>>>) {
+async fn stdin_readline_thread(event_writer: Sender<Event>) {
     loop {
         let mut stdin = BufReader::new(io::stdin()).lines();
 
         match stdin.next_line().await {
             Ok(Some(line)) => match InputParser::parse(line) {
                 Ok(cmd) => match cmd {
-                    InputCommand::Start => event_queue.lock().await.push_front(Event::StartRequest),
-                    InputCommand::Step(coord_guess) => event_queue
-                        .lock()
-                        .await
-                        .push_front(Event::MakeGuess(coord_guess)),
+                    InputCommand::Start => {
+                        event_writer
+                            .send(Event::StartRequest)
+                            .await
+                            .expect("Failed sending event");
+                    }
+                    InputCommand::Step(coord_guess) => {
+                        event_writer
+                            .send(Event::MakeGuess(coord_guess))
+                            .await
+                            .expect("Failed sending event");
+                    }
                 },
                 Err(err) => {
                     error!("Cannot parse command: {:?}", err);
@@ -483,28 +495,29 @@ async fn main() {
     pretty_env_logger::init();
     info!("Torpedo starts");
 
+    let (event_writer, event_reader) = tokio::sync::mpsc::channel::<Event>(16);
+
     let cmd_line_args = CmdLineArgs::parse();
-    let event_queue: Arc<Mutex<VecDeque<Event>>> = Arc::new(Mutex::new(VecDeque::new()));
     let cmd_queue: Arc<Mutex<VecDeque<Command>>> = Arc::new(Mutex::new(VecDeque::new()));
 
     let session_id = cmd_line_args.session_id.clone();
     let gamer_id = cmd_line_args.gamer_id.clone();
 
-    let event_queue_clone = event_queue.clone();
     let cmd_queue_clone = cmd_queue.clone();
     let client = MGNClient::new(cmd_line_args.server, session_id, gamer_id).unwrap();
     let client_clone = client.clone();
 
-    let mut game = Game::new(client, event_queue.clone(), cmd_queue.clone());
+    let mut game = Game::new(client, event_reader, cmd_queue.clone());
     game.init().await;
 
+    let event_writer_clone = event_writer.clone();
     tokio::spawn(async move {
-        background_thread(client_clone, event_queue_clone, cmd_queue_clone).await;
+        background_thread(client_clone, event_writer_clone, cmd_queue_clone).await;
     });
 
-    let event_queue_clone = event_queue.clone();
+    let event_writer_clone = event_writer.clone();
     tokio::spawn(async move {
-        stdin_readline_thread(event_queue_clone).await;
+        stdin_readline_thread(event_writer_clone).await;
     });
 
     game.run().await;
