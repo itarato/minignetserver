@@ -61,21 +61,7 @@ enum InputCommand {
 #[derive(Debug)]
 enum Event {
     StartRequest,
-    GameIsActive,
-    TurnIsActive(bool),
     MakeGuess(Coord),
-}
-
-#[derive(Debug)]
-enum Command {
-    WaitForGameOn,
-    WaitForTurn(bool),
-}
-
-enum BackgroundState {
-    Idle,
-    WaitForGameOn,
-    WaitForTurn(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,12 +98,11 @@ struct Game {
     ship_coords: Vec<Coord>,
     client: MGNClient,
     event_reader: Receiver<Event>,
-    cmd_writer: Sender<Command>,
     state: GameState,
 }
 
 impl Game {
-    fn new(client: MGNClient, event_reader: Receiver<Event>, cmd_writer: Sender<Command>) -> Self {
+    fn new(client: MGNClient, event_reader: Receiver<Event>) -> Self {
         let mut ship_coords = vec![];
         for ship_size in SHIP_SIZES {
             loop {
@@ -156,7 +141,6 @@ impl Game {
             ship_coords,
             client,
             event_reader,
-            cmd_writer,
             state: GameState::Init,
         }
     }
@@ -166,11 +150,6 @@ impl Game {
             Ok(Response::Ok) => info!("Joined session"),
             response => panic!("Unexpected response for join: {:?}", response),
         }
-
-        self.cmd_writer
-            .send(Command::WaitForGameOn)
-            .await
-            .expect("Failed sending command");
     }
 
     async fn run(&mut self) {
@@ -181,6 +160,7 @@ impl Game {
                 _ = self.consume_events() => {}
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {
                     self.consume_messages().await;
+                    self.watch_for_state_change().await;
                 }
             };
         }
@@ -204,25 +184,6 @@ impl Game {
                                 panic!("Unexpected response for session start: {:?}", response)
                             }
                         };
-                    }
-                    Event::GameIsActive => {
-                        self.state = GameState::OtherTurn;
-
-                        self.cmd_writer
-                            .send(Command::WaitForTurn(true))
-                            .await
-                            .expect("Failed sending command");
-                    }
-                    Event::TurnIsActive(is_self) => {
-                        if !is_self {
-                            self.state = GameState::OtherTurn;
-                            self.cmd_writer
-                                .send(Command::WaitForTurn(true))
-                                .await
-                                .expect("Failed sending command");
-                        } else {
-                            self.state = GameState::SelfTurn;
-                        }
                     }
                     Event::MakeGuess(coord) => {
                         if self.state != GameState::SelfTurn {
@@ -306,12 +267,7 @@ impl Game {
                             };
 
                             match self.client.next_gamer().await {
-                                Ok(Response::Ok) => {
-                                    self.cmd_writer
-                                        .send(Command::WaitForTurn(false))
-                                        .await
-                                        .expect("Failed sending command");
-                                }
+                                Ok(Response::Ok) => { /* noop */ }
                                 response => {
                                     panic!("Unexpected response to NEXT-GAMER: {:?}", response);
                                 }
@@ -327,6 +283,44 @@ impl Game {
                 );
             }
         }
+    }
+
+    async fn watch_for_state_change(&mut self) {
+        match self.state {
+            GameState::Init => match self.client.is_game_on().await {
+                Ok(Response::OkWithBool(is_game_on)) => {
+                    if is_game_on {
+                        info!("Game session has started");
+                        self.change_state(GameState::OtherTurn);
+                    }
+                }
+                response => panic!("Unexpected response to IS-GAME-ON: {:?}", response),
+            },
+            GameState::SelfTurn => match self.client.is_gamer_turn().await {
+                Ok(Response::OkWithBool(is_my_turn)) => {
+                    if !is_my_turn {
+                        info!("Other player turn");
+                        self.change_state(GameState::OtherTurn);
+                    }
+                }
+                response => panic!("Unexpected response to IS-GAMER-TURN: {:?}", response),
+            },
+            GameState::OtherTurn => match self.client.is_gamer_turn().await {
+                Ok(Response::OkWithBool(is_my_turn)) => {
+                    if is_my_turn {
+                        info!("Self player turn");
+                        self.change_state(GameState::SelfTurn);
+                    }
+                }
+                response => panic!("Unexpected response to IS-GAMER-TURN: {:?}", response),
+            },
+        }
+    }
+
+    fn change_state(&mut self, state: GameState) {
+        info!("Game state change: {:?} -> {:?}", self.state, state);
+        self.state = state;
+        self.refresh_screen();
     }
 
     fn refresh_screen(&self) {
@@ -388,64 +382,6 @@ impl Game {
     }
 }
 
-async fn background_thread(
-    client: MGNClient,
-    event_writer: Sender<Event>,
-    mut cmd_reader: Receiver<Command>,
-) {
-    info!("Background thread has started");
-    let mut state = BackgroundState::Idle;
-
-    loop {
-        tokio::select! {
-            Some(cmd) = cmd_reader.recv() => {
-                info!("Got command: {:?}", &cmd);
-
-                match cmd {
-                    Command::WaitForTurn(is_self) => state = BackgroundState::WaitForTurn(is_self),
-                    Command::WaitForGameOn => state = BackgroundState::WaitForGameOn,
-                }
-            }
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {
-                match state {
-                    BackgroundState::Idle => {}
-                    BackgroundState::WaitForTurn(expectation) => match client.is_gamer_turn().await {
-                        Ok(response) => match response {
-                            minignetcommon::Response::OkWithBool(is_my_turn) => {
-                                info!("IS-MY-TURN response: {}", is_my_turn);
-                                if is_my_turn == expectation {
-                                    state = BackgroundState::Idle;
-                                    event_writer
-                                        .send(Event::TurnIsActive(is_my_turn))
-                                        .await
-                                        .expect("Failed sending event");
-                                }
-                            }
-                            _ => panic!("Unexpected response to IS-GAMER-TURN: {:?}", response),
-                        },
-                        Err(_) => panic!("Error while checking turn"),
-                    },
-                    BackgroundState::WaitForGameOn => match client.is_game_on().await {
-                        Ok(response) => match response {
-                            minignetcommon::Response::OkWithBool(is_game_on) => {
-                                info!("IS-GAME-ON response: {}", is_game_on);
-                                if is_game_on {
-                                    event_writer
-                                        .send(Event::GameIsActive)
-                                        .await
-                                        .expect("Failed sending event");
-                                }
-                            }
-                            _ => panic!("Unexpected response to IS-GAME-ON: {:?}", response),
-                        },
-                        Err(_) => panic!("Error while checking turn"),
-                    },
-                }
-            }
-        }
-    }
-}
-
 async fn stdin_readline_thread(event_writer: Sender<Event>) {
     loop {
         let mut stdin = BufReader::new(io::stdin()).lines();
@@ -481,20 +417,13 @@ async fn main() {
     info!("Torpedo starts");
 
     let (event_writer, event_reader) = tokio::sync::mpsc::channel::<Event>(16);
-    let (cmd_writer, cmd_reader) = tokio::sync::mpsc::channel::<Command>(16);
     let cmd_line_args = CmdLineArgs::parse();
     let session_id = cmd_line_args.session_id.clone();
     let gamer_id = cmd_line_args.gamer_id.clone();
     let client = MGNClient::new(cmd_line_args.server, session_id, gamer_id).unwrap();
-    let client_clone = client.clone();
 
-    let mut game = Game::new(client, event_reader, cmd_writer.clone());
+    let mut game = Game::new(client, event_reader);
     game.init().await;
-
-    let event_writer_clone = event_writer.clone();
-    tokio::spawn(async move {
-        background_thread(client_clone, event_writer_clone, cmd_reader).await;
-    });
 
     let event_writer_clone = event_writer.clone();
     tokio::spawn(async move {
