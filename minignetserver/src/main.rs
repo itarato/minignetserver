@@ -314,7 +314,7 @@ impl MGNServer {
     }
 
     async fn reply_client(writer: &mut WriteHalf<'_>, response: Response) {
-        let encoded = bincode::encode_to_vec(response.clone(), bincode::config::standard())
+        let encoded = bincode::encode_to_vec(&response, bincode::config::standard())
             .expect(&format!("Failed encoding response message: {:?}", response));
         if let Err(err) = writer.write(&encoded[..]).await {
             error!("Failed responding to client: {:?}", err);
@@ -460,13 +460,11 @@ impl MGNServer {
                     return;
                 }
             };
-            match session.user_states.get_mut(&gamer_id) {
-                Some(user_state) => user_state.add_update(update),
-                None => {
-                    error!("Gamer is missing missing");
-                    MGNServer::reply_client(writer, Response::Error).await;
-                    return;
-                }
+
+            if !session.add_update(gamer_id, update) {
+                error!("Gamer is missing missing");
+                MGNServer::reply_client(writer, Response::Error).await;
+                return;
             }
         }
 
