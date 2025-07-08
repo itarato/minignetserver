@@ -5,7 +5,6 @@ use bincode::{Decode, Encode};
 use log::{error, info, warn};
 use std::io::Write;
 use std::time::Duration;
-use tokio::sync::mpsc::{Receiver, Sender};
 
 use clap::Parser;
 use minignetclient::MGNClient;
@@ -58,12 +57,6 @@ enum InputCommand {
     Step(Coord),
 }
 
-#[derive(Debug)]
-enum Event {
-    StartRequest,
-    MakeGuess(Coord),
-}
-
 #[derive(Debug, Clone, PartialEq)]
 enum GameState {
     Init,
@@ -97,12 +90,11 @@ struct Game {
     other_board: [CellState; 100],
     ship_coords: Vec<Coord>,
     client: MGNClient,
-    event_reader: Receiver<Event>,
     state: GameState,
 }
 
 impl Game {
-    fn new(client: MGNClient, event_reader: Receiver<Event>) -> Self {
+    fn new(client: MGNClient) -> Self {
         let mut ship_coords = vec![];
         for ship_size in SHIP_SIZES {
             loop {
@@ -140,7 +132,6 @@ impl Game {
             other_board: [CellState::Undiscovered; 100],
             ship_coords,
             client,
-            event_reader,
             state: GameState::Init,
         }
     }
@@ -153,70 +144,67 @@ impl Game {
     }
 
     async fn run(&mut self) {
+        let mut stdin = BufReader::new(io::stdin()).lines();
+
         self.refresh_screen();
 
         loop {
             tokio::select! {
-                _ = self.consume_events() => {}
+                input_line_result = stdin.next_line() => {
+                    match input_line_result {
+                        Ok(Some(line)) => match InputParser::parse(line) {
+                            Ok(cmd) => match cmd {
+                                InputCommand::Start => {
+                                    if self.state != GameState::Init {
+                                        warn!("Cannot start game, already started.");
+                                        return;
+                                    }
+
+                                    match self.client.start_session().await {
+                                        Ok(Response::Ok) => info!("Session start requested"),
+                                        response => {
+                                            panic!("Unexpected response for session start: {:?}", response)
+                                        }
+                                    };
+                                }
+                                InputCommand::Step(coord) => {
+                                    if self.state != GameState::SelfTurn {
+                                        warn!("Cannot guess while not on turn");
+                                        return;
+                                    }
+
+                                    match self
+                                        .client
+                                        .send_message(Message {
+                                            from: self.client.gamer_id.clone(),
+                                            to: MessageAddress::All,
+                                            payload: bincode::encode_to_vec(
+                                                TorpedoMessage::Guess(coord),
+                                                bincode::config::standard(),
+                                            )
+                                            .expect("Failed encoding guess"),
+                                        })
+                                        .await
+                                    {
+                                        Ok(Response::Ok) => { /* noop */ }
+                                        response => {
+                                            panic!("Unexpected respone to SEND-MESSAGE: {:?}", response)
+                                        }
+                                    }
+                                }
+                            },
+                            Err(err) => {
+                                error!("Cannot parse command: {:?}", err);
+                            }
+                        },
+                        error => warn!("Unexpected result at line reading: {:?}", error),
+                    }
+                }
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {
                     self.consume_messages().await;
                     self.watch_for_state_change().await;
                 }
             };
-        }
-    }
-
-    async fn consume_events(&mut self) {
-        match self.event_reader.recv().await {
-            Some(event) => {
-                info!("Got event: {:?}", &event);
-
-                match event {
-                    Event::StartRequest => {
-                        if self.state != GameState::Init {
-                            warn!("Cannot start game, already started.");
-                            return;
-                        }
-
-                        match self.client.start_session().await {
-                            Ok(Response::Ok) => info!("Session start requested"),
-                            response => {
-                                panic!("Unexpected response for session start: {:?}", response)
-                            }
-                        };
-                    }
-                    Event::MakeGuess(coord) => {
-                        if self.state != GameState::SelfTurn {
-                            warn!("Cannot guess while not on turn");
-                            return;
-                        }
-
-                        match self
-                            .client
-                            .send_message(Message {
-                                from: self.client.gamer_id.clone(),
-                                to: MessageAddress::All,
-                                payload: bincode::encode_to_vec(
-                                    TorpedoMessage::Guess(coord),
-                                    bincode::config::standard(),
-                                )
-                                .expect("Failed encoding guess"),
-                            })
-                            .await
-                        {
-                            Ok(Response::Ok) => { /* noop */ }
-                            response => {
-                                panic!("Unexpected respone to SEND-MESSAGE: {:?}", response)
-                            }
-                        }
-                    }
-                }
-
-                self.refresh_screen();
-            }
-            None => {
-                error!("No event");
-            }
         }
     }
 
@@ -382,53 +370,17 @@ impl Game {
     }
 }
 
-async fn stdin_readline_thread(event_writer: Sender<Event>) {
-    loop {
-        let mut stdin = BufReader::new(io::stdin()).lines();
-
-        match stdin.next_line().await {
-            Ok(Some(line)) => match InputParser::parse(line) {
-                Ok(cmd) => match cmd {
-                    InputCommand::Start => {
-                        event_writer
-                            .send(Event::StartRequest)
-                            .await
-                            .expect("Failed sending event");
-                    }
-                    InputCommand::Step(coord_guess) => {
-                        event_writer
-                            .send(Event::MakeGuess(coord_guess))
-                            .await
-                            .expect("Failed sending event");
-                    }
-                },
-                Err(err) => {
-                    error!("Cannot parse command: {:?}", err);
-                }
-            },
-            error => warn!("Unexpected result at line reading: {:?}", error),
-        }
-    }
-}
-
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
     info!("Torpedo starts");
 
-    let (event_writer, event_reader) = tokio::sync::mpsc::channel::<Event>(16);
     let cmd_line_args = CmdLineArgs::parse();
     let session_id = cmd_line_args.session_id.clone();
     let gamer_id = cmd_line_args.gamer_id.clone();
     let client = MGNClient::new(cmd_line_args.server, session_id, gamer_id).unwrap();
 
-    let mut game = Game::new(client, event_reader);
+    let mut game = Game::new(client);
     game.init().await;
-
-    let event_writer_clone = event_writer.clone();
-    tokio::spawn(async move {
-        stdin_readline_thread(event_writer_clone).await;
-    });
-
     game.run().await;
 }
