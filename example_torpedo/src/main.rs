@@ -151,60 +151,64 @@ impl Game {
         loop {
             tokio::select! {
                 input_line_result = stdin.next_line() => {
-                    match input_line_result {
-                        Ok(Some(line)) => match InputParser::parse(line) {
-                            Ok(cmd) => match cmd {
-                                InputCommand::Start => {
-                                    if self.state != GameState::Init {
-                                        warn!("Cannot start game, already started.");
-                                        return;
-                                    }
-
-                                    match self.client.start_session().await {
-                                        Ok(Response::Ok) => info!("Session start requested"),
-                                        response => {
-                                            panic!("Unexpected response for session start: {:?}", response)
-                                        }
-                                    };
-                                }
-                                InputCommand::Step(coord) => {
-                                    if self.state != GameState::SelfTurn {
-                                        warn!("Cannot guess while not on turn");
-                                        return;
-                                    }
-
-                                    match self
-                                        .client
-                                        .send_message(Message {
-                                            from: self.client.gamer_id.clone(),
-                                            to: MessageAddress::All,
-                                            payload: bincode::encode_to_vec(
-                                                TorpedoMessage::Guess(coord),
-                                                bincode::config::standard(),
-                                            )
-                                            .expect("Failed encoding guess"),
-                                        })
-                                        .await
-                                    {
-                                        Ok(Response::Ok) => { /* noop */ }
-                                        response => {
-                                            panic!("Unexpected respone to SEND-MESSAGE: {:?}", response)
-                                        }
-                                    }
-                                }
-                            },
-                            Err(err) => {
-                                error!("Cannot parse command: {:?}", err);
-                            }
-                        },
-                        error => warn!("Unexpected result at line reading: {:?}", error),
-                    }
+                    self.handle_input(input_line_result).await;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {
                     self.consume_messages().await;
                     self.watch_for_state_change().await;
                 }
             };
+        }
+    }
+
+    async fn handle_input(&mut self, input_line_result: io::Result<Option<String>>) {
+        match input_line_result {
+            Ok(Some(line)) => match InputParser::parse(line) {
+                Ok(cmd) => match cmd {
+                    InputCommand::Start => {
+                        if self.state != GameState::Init {
+                            warn!("Cannot start game, already started.");
+                            return;
+                        }
+
+                        match self.client.start_session().await {
+                            Ok(Response::Ok) => info!("Session start requested"),
+                            response => {
+                                panic!("Unexpected response for session start: {:?}", response)
+                            }
+                        };
+                    }
+                    InputCommand::Step(coord) => {
+                        if self.state != GameState::SelfTurn {
+                            warn!("Cannot guess while not on turn");
+                            return;
+                        }
+
+                        match self
+                            .client
+                            .send_message(Message {
+                                from: self.client.gamer_id.clone(),
+                                to: MessageAddress::All,
+                                payload: bincode::encode_to_vec(
+                                    TorpedoMessage::Guess(coord),
+                                    bincode::config::standard(),
+                                )
+                                .expect("Failed encoding guess"),
+                            })
+                            .await
+                        {
+                            Ok(Response::Ok) => { /* noop */ }
+                            response => {
+                                panic!("Unexpected respone to SEND-MESSAGE: {:?}", response)
+                            }
+                        }
+                    }
+                },
+                Err(err) => {
+                    error!("Cannot parse command: {:?}", err);
+                }
+            },
+            error => warn!("Unexpected result at line reading: {:?}", error),
         }
     }
 
